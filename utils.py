@@ -1,6 +1,8 @@
 import random
 import numpy as np
 import torch
+from datasets import load_dataset
+from synthetic_data import AdvancedSyntheticGenerator
 
 def set_seed_everything(seed=42):
     random.seed(seed)
@@ -81,3 +83,54 @@ def compute_advanced_class_weights(dataset, label_list):
             weights[label_id] *= multiplier
     weights = weights / weights.sum() * len(weights)
     return weights
+
+# Load CoNLL-2003
+conll = load_dataset("conll2003")
+
+# Map: 1,2 = B/I-PER; 3,4 = B/I-ORG
+def filter_conll_for_person_org(examples):
+    filtered = []
+    for ex in examples:
+        if any(tag in [1,2,3,4] for tag in ex['ner_tags']):
+            filtered.append({
+                'tokens': ex['tokens'],
+                'ner_tags': [tag if tag in [0,1,2,3,4] else 0 for tag in ex['ner_tags']]
+            })
+    return filtered
+
+conll_clean = filter_conll_for_person_org(conll['train'])
+
+# Load Census (replace with your local path if needed)
+census = load_dataset(
+    "csv",
+    data_files="path_or_url_to_census.csv",
+    csv_args={"header": 0}
+)
+
+from data_cleaning import ProductionDataCleaner
+cleaner = ProductionDataCleaner()
+census_cleaned = cleaner.clean_census_data(census['train'])
+
+def filter_census_for_email_phone(examples):
+    filtered = []
+    for ex in examples:
+        if any(tag in [9,10,11,12] for tag in ex['ner_tags']):
+            filtered.append({
+                'tokens': ex['tokens'],
+                'ner_tags': [tag if tag in [0,9,10,11,12] else 0 for tag in ex['ner_tags']]
+            })
+    return filtered
+
+census_clean = filter_census_for_email_phone(census_cleaned)
+
+all_examples = conll_clean + census_clean
+
+synthetic_generator = AdvancedSyntheticGenerator()
+synthetic_examples = synthetic_generator.generate_realistic_examples(1000)  # or any number
+
+all_examples += synthetic_examples
+
+random.shuffle(all_examples)
+
+# Split into train/val/test
+splits = advanced_dataset_split(all_examples)
