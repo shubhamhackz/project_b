@@ -9,6 +9,11 @@ import json
 import matplotlib.pyplot as plt
 import pandas as pd
 from IPython.display import clear_output
+import logging
+import transformers
+from transformers import TrainerCallback
+import mlflow
+import traceback
 
 from utils import set_seed_everything, advanced_dataset_split, advanced_tokenize_and_align_labels, compute_advanced_class_weights
 from data_cleaning import ProductionDataCleaner
@@ -16,6 +21,11 @@ from synthetic_data import AdvancedSyntheticGenerator
 from model import AdvancedNERModel
 from train import MonitoredTrainer, TrainingLogger
 from evaluate import compute_advanced_metrics
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+mlflow.set_experiment("NER-Production-Experiment")
 
 def main():
     # ============= ENVIRONMENT SETUP =============
@@ -38,7 +48,7 @@ def main():
     synthetic_generator = AdvancedSyntheticGenerator()
 
     # 1. Load CoNLL-2003 with multiple fallback strategies
-    print("1️⃣ Loading CoNLL-2003 for clean PER/ORG...")
+    logger.info("1️⃣ Loading CoNLL-2003 for clean PER/ORG...")
     conll = None
     approaches = [
         ("streaming=True", lambda: load_dataset("conll2003", streaming=True)),
@@ -202,6 +212,33 @@ def main():
     total_training_steps = steps_per_epoch * training_args.num_train_epochs
     training_logger = TrainingLogger(total_training_steps, len(all_examples), device)
 
+    # Model checkpointing and resume logic
+    checkpoint_dir = './checkpoints'
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    # Save model version/config/metadata with each checkpoint
+    model_version = "1.0.0"
+
+    class SaveMetadataCallback(TrainerCallback):
+        def on_save(self, args, state, control, **kwargs):
+            metadata = {
+                'model_version': model_version,
+                'config': model.config.to_dict() if hasattr(model, 'config') else {},
+                'label_list': label_list,
+                'timestamp': datetime.now().isoformat(),
+            }
+            with open(os.path.join(args.output_dir, 'checkpoint_metadata.json'), 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+    # Add SaveMetadataCallback to callbacks
+    callbacks = [EarlyStoppingCallback(early_stopping_patience=4), SaveMetadataCallback()]
+
+    # Allow resuming from checkpoint
+    resume_from_checkpoint = None
+    if os.path.exists(os.path.join(checkpoint_dir, 'pytorch_model.bin')):
+        resume_from_checkpoint = checkpoint_dir
+        logger.info(f"Resuming from checkpoint: {resume_from_checkpoint}")
+
     trainer = MonitoredTrainer(
         logger=training_logger,
         model=model,
@@ -211,12 +248,31 @@ def main():
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=lambda eval_preds: compute_advanced_metrics(eval_preds, label_list),
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=4)]
+        callbacks=callbacks,
     )
 
     training_logger.start_training()
     print("\n🔥 Starting training with comprehensive monitoring...")
-    train_result = trainer.train()
+    with mlflow.start_run():
+        mlflow.log_param("model_checkpoint", model_checkpoint)
+        mlflow.log_param("num_epochs", training_args.num_train_epochs)
+        mlflow.log_param("learning_rate", training_args.learning_rate)
+        mlflow.log_param("batch_size", training_args.per_device_train_batch_size)
+        # Log data stats
+        mlflow.log_metric("num_train_examples", len(tokenized_datasets['train']))
+        mlflow.log_metric("num_val_examples", len(tokenized_datasets['validation']))
+        mlflow.log_metric("num_test_examples", len(tokenized_datasets['test']))
+        # Training
+        train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+        mlflow.log_metric("final_train_loss", train_result.training_loss)
+        # Evaluation
+        for split_name in ['validation', 'test']:
+            results = trainer.evaluate(tokenized_datasets[split_name])
+            for k, v in results.items():
+                mlflow.log_metric(f"{split_name}_{k}", v)
+        # Save model artifact
+        mlflow.pytorch.log_model(model, "model")
+        logger.info("Model and artifacts logged to MLflow.")
     training_end_time = datetime.now()
 
     # ============= EVALUATION =============
@@ -266,5 +322,101 @@ def main():
         json.dump(metadata, f, indent=2)
     print("Metadata saved.")
 
+    # Example: Replace print with logger.info
+    logger.info("1️⃣ Loading CoNLL-2003 for clean PER/ORG...")
+    # Add data validation and stats logging after loading datasets
+
+    def log_data_stats(examples, label_list, name="Dataset"):
+        from collections import Counter
+        logger.info(f"{name} stats:")
+        logger.info(f"  Total examples: {len(examples):,}")
+        if examples:
+            token_count = sum(len(e['tokens']) for e in examples)
+            logger.info(f"  Total tokens: {token_count:,}")
+            label_counts = Counter()
+            for e in examples:
+                label_counts.update(e['ner_tags'])
+            for i, label in enumerate(label_list):
+                logger.info(f"    {label}: {label_counts.get(i, 0):,}")
+            logger.info(f"  Sample: {examples[0]}")
+
+    # After loading each dataset:
+    log_data_stats(conll_processed, label_list, name="CoNLL-2003")
+    log_data_stats(cleaned_census, label_list, name="Census")
+    log_data_stats(synthetic_examples, label_list, name="Synthetic")
+
+    # Data validation: check for missing values and label alignment
+    for dataset_name, dataset in [("CoNLL-2003", conll_processed), ("Census", cleaned_census), ("Synthetic", synthetic_examples)]:
+        for ex in dataset:
+            if len(ex['tokens']) != len(ex['ner_tags']):
+                logger.warning(f"Token/label mismatch in {dataset_name}: {ex}")
+            if any(l is None for l in ex['ner_tags']):
+                logger.warning(f"Missing label in {dataset_name}: {ex}")
+
+    # Support for custom/local datasets (add CLI/config option to specify file paths)
+    # Example: load from local CSV if provided
+    custom_data_path = os.environ.get('CUSTOM_DATA_PATH')
+    if custom_data_path and os.path.exists(custom_data_path):
+        logger.info(f"Loading custom dataset from {custom_data_path}")
+        custom_data = load_dataset("csv", data_files=custom_data_path)
+        # Add cleaning/processing as needed
+
+def predict_single(text, tokenizer, model, label_list):
+    tokens = tokenizer.tokenize(text)
+    inputs = tokenizer(text, return_tensors="pt")
+    with torch.no_grad():
+        outputs = model(**inputs)
+        logits = outputs["logits"]
+        pred_ids = model.decode(logits, inputs["attention_mask"])
+    pred_labels = [label_list[i] for i in pred_ids[0]]
+    return list(zip(tokens, pred_labels))
+
+def predict_batch(texts, tokenizer, model, label_list):
+    results = []
+    for text in texts:
+        results.append(predict_single(text, tokenizer, model, label_list))
+    return results
+
+# Export to ONNX
+import torch.onnx
+onnx_path = "model.onnx"
+dummy_input = torch.randint(0, len(tokenizer), (1, 32))
+try:
+    torch.onnx.export(model, (dummy_input,), onnx_path, input_names=["input_ids"], output_names=["logits"])
+    logger.info(f"Model exported to ONNX: {onnx_path}")
+except Exception as e:
+    logger.warning(f"ONNX export failed: {e}")
+
+# Post-processing: group entities and output as JSON
+import json
+def group_entities(tokens, labels):
+    entities = []
+    current = None
+    for token, label in zip(tokens, labels):
+        if label.startswith("B-"):
+            if current:
+                entities.append(current)
+            current = {"type": label[2:], "tokens": [token]}
+        elif label.startswith("I-") and current:
+            current["tokens"].append(token)
+        else:
+            if current:
+                entities.append(current)
+                current = None
+    if current:
+        entities.append(current)
+    return entities
+
+def predict_and_format(text, tokenizer, model, label_list):
+    result = predict_single(text, tokenizer, model, label_list)
+    tokens, labels = zip(*result)
+    entities = group_entities(tokens, labels)
+    return json.dumps(entities, indent=2)
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.error(f"Exception occurred: {e}")
+        logger.error(traceback.format_exc())
+        raise
