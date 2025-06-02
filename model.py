@@ -24,11 +24,17 @@ class AdvancedNERModel(nn.Module):
         self.loss_weights = nn.Parameter(torch.ones(num_labels), requires_grad=False)
 
     def forward(self, input_ids, attention_mask=None, token_type_ids=None, labels=None):
-        outputs = self.transformer(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids
-        )
+        # Check if the model supports token_type_ids (DistilBERT doesn't)
+        transformer_inputs = {
+            'input_ids': input_ids,
+            'attention_mask': attention_mask
+        }
+        
+        # Only add token_type_ids if the model supports it
+        if token_type_ids is not None and hasattr(self.transformer, 'embeddings') and hasattr(self.transformer.embeddings, 'token_type_embeddings'):
+            transformer_inputs['token_type_ids'] = token_type_ids
+        
+        outputs = self.transformer(**transformer_inputs)
         sequence_output = self.dropout(outputs.last_hidden_state)
         logits = self.classifier(sequence_output)
         outputs_dict = {"logits": logits}

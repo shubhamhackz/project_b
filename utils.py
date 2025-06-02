@@ -65,6 +65,11 @@ def advanced_tokenize_and_align_labels(examples, tokenizer, label_list):
         labels.append(label_ids)
     tokenized_inputs["labels"] = labels
     tokenized_inputs.pop("offset_mapping", None)
+    
+    # Remove token_type_ids for DistilBERT compatibility
+    if "token_type_ids" in tokenized_inputs:
+        tokenized_inputs.pop("token_type_ids")
+    
     return tokenized_inputs
 
 def compute_advanced_class_weights(dataset, label_list):
