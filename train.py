@@ -1,4 +1,5 @@
 from transformers import Trainer, EarlyStoppingCallback
+import time
 
 class ProductionCRFTrainer(Trainer):
     def __init__(self, *args, **kwargs):
