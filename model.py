@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModel
-from pytorch_crf import CRF
+from torchcrf import CRF
 
 class AdvancedNERModel(nn.Module):
     """
