@@ -90,9 +90,11 @@ def compute_advanced_class_weights(dataset, label_list):
 
 # Robust multi-step loading for CoNLL-2003
 def load_conll_with_fallback(label_list):
-    # Try local files first
+    # Try local files FIRST - this works reliably in Colab
+    logger.info("🔄 Attempting to load CoNLL-2003 from local files...")
     local_data = load_local_conll_data()
     if local_data:
+        logger.info(f"✅ Successfully loaded {len(local_data)} examples from local CoNLL-2003 files")
         def filter_conll_for_person_org(examples):
             filtered = []
             for ex in examples:
@@ -104,14 +106,15 @@ def load_conll_with_fallback(label_list):
             return filtered
         return filter_conll_for_person_org(local_data)
     
-    # Fall back to remote loading
+    # Fall back to remote loading only if local fails
     logger.info("Local CoNLL-2003 not found, trying remote loading...")
     approaches = [
         ("basic loading", lambda: load_dataset("conll2003")),
-        ("streaming=True", lambda: load_dataset("conll2003", streaming=True)),
+        ("with trust_remote_code", lambda: load_dataset("conll2003", trust_remote_code=True)),
         ("no verification", lambda: load_dataset("conll2003", verification_mode="no_checks")),
         ("force redownload", lambda: load_dataset("conll2003", download_mode="force_redownload")),
     ]
+    
     conll = None
     for approach_name, load_func in approaches:
         try:
@@ -136,6 +139,7 @@ def load_conll_with_fallback(label_list):
                     'ner_tags': [tag if tag in [0,1,2,3,4] else 0 for tag in ex['ner_tags']]
                 })
         return filtered
+    
     if conll is not None:
         return filter_conll_for_person_org(conll['train'])
     else:
@@ -144,7 +148,7 @@ def load_conll_with_fallback(label_list):
 
 # Robust multi-step loading for Census
 def load_census_with_fallback(label_list, cleaner, census_path=None):
-    # Try local pre-filtered file first (most efficient)
+    # Try local pre-filtered file first (most efficient for Colab)
     local_clean_file = "data/census_clean.json"
     if os.path.exists(local_clean_file):
         try:
@@ -170,60 +174,16 @@ def load_census_with_fallback(label_list, cleaner, census_path=None):
         except Exception as e:
             logger.warning(f"Failed to load local census file: {e}")
     
-    # Fall back to extraction script
-    try:
-        logger.info("Local census file not found, running extraction...")
-        from scripts.extract_census_data import load_local_census_data
-        cleaned_data = load_local_census_data()
-        
-        def filter_census_for_email_phone(examples):
-            filtered = []
-            for ex in examples:
-                if any(tag in [9,10,11,12] for tag in ex['ner_tags']):
-                    filtered.append({
-                        'tokens': ex['tokens'],
-                        'ner_tags': [tag if tag in [0,9,10,11,12] else 0 for tag in ex['ner_tags']]
-                    })
-            return filtered
-        
-        result = filter_census_for_email_phone(cleaned_data)
-        logger.info(f"✅ Extracted and loaded {len(result)} census examples")
-        return result
-    except Exception as e:
-        logger.warning(f"Census extraction failed: {e}")
-    
-    # Original fallback approaches (download full dataset)
-    census_approaches = []
-    
-    if census_path:
-        census_approaches.append(
-            ("local file", lambda: load_dataset("csv", data_files=census_path))
-        )
-    
-    # Multiple remote loading strategies
-    census_approaches.extend([
-        ("remote URL basic", lambda: load_dataset(
-            "csv",
-            data_files="https://huggingface.co/datasets/Josephgflowers/CENSUS-NER-Name-Email-Address-Phone/resolve/main/FMCSA_CENSUS1_2016Sep_formatted_output.csv"
-        )),
-        ("remote URL no cache", lambda: load_dataset(
-            "csv",
-            data_files="https://huggingface.co/datasets/Josephgflowers/CENSUS-NER-Name-Email-Address-Phone/resolve/main/FMCSA_CENSUS1_2016Sep_formatted_output.csv",
-            cache_dir=None
-        )),
-        ("remote URL force download", lambda: load_dataset(
-            "csv",
-            data_files="https://huggingface.co/datasets/Josephgflowers/CENSUS-NER-Name-Email-Address-Phone/resolve/main/FMCSA_CENSUS1_2016Sep_formatted_output.csv",
-            download_mode="force_redownload"
-        ))
-    ])
-    
-    for approach_name, load_func in census_approaches:
+    # Try LLM generated data if available
+    llm_file = "data/llm_generated.json"
+    if os.path.exists(llm_file):
         try:
-            logger.info(f"Trying to load Census: {approach_name}")
-            census = load_func()
-            cleaned = cleaner.clean_census_data(census['train'])
-            def filter_census_for_email_phone(examples):
+            logger.info(f"📂 Loading LLM-generated data from {llm_file}")
+            import json
+            with open(llm_file, 'r') as f:
+                llm_data = json.load(f)
+            
+            def filter_llm_for_email_phone(examples):
                 filtered = []
                 for ex in examples:
                     if any(tag in [9,10,11,12] for tag in ex['ner_tags']):
@@ -232,27 +192,83 @@ def load_census_with_fallback(label_list, cleaner, census_path=None):
                             'ner_tags': [tag if tag in [0,9,10,11,12] else 0 for tag in ex['ner_tags']]
                         })
                 return filtered
-            result = filter_census_for_email_phone(cleaned)
-            logger.info(f"Successfully loaded Census with {approach_name}")
+            
+            result = filter_llm_for_email_phone(llm_data)
+            logger.info(f"✅ Loaded {len(result)} LLM-generated examples with email/phone")
             return result
         except Exception as e:
-            logger.warning(f"Census loading failed with {approach_name}: {str(e)[:100]}...")
-            continue
+            logger.warning(f"Failed to load LLM generated file: {e}")
     
-    logger.warning("All Census loading approaches failed")
+    logger.warning("Census data loading failed: No local files found.")
+    return []
+
+# Add LLM data loading function
+def load_llm_generated_data():
+    """Load LLM-generated data from local files"""
+    llm_file = "data/llm_generated.json"
+    if os.path.exists(llm_file):
+        try:
+            logger.info(f"📂 Loading LLM-generated data from {llm_file}")
+            import json
+            with open(llm_file, 'r') as f:
+                llm_data = json.load(f)
+            logger.info(f"✅ Loaded {len(llm_data)} LLM-generated examples")
+            return llm_data
+        except Exception as e:
+            logger.warning(f"Failed to load LLM generated file: {e}")
     return []
 
 # Utility to prepare combined dataset
 def prepare_combined_dataset(label_list, cleaner, census_path=None, synthetic_count=1000):
+    logger.info("📊 Preparing combined NER dataset from multiple sources...")
+    
+    # Load all available data sources
+    all_examples = []
+    
+    # 1. Try to load CoNLL-2003 data
+    logger.info("🔄 Loading CoNLL-2003 data...")
     conll_clean = load_conll_with_fallback(label_list)
+    if conll_clean:
+        all_examples.extend(conll_clean)
+        logger.info(f"✅ Added {len(conll_clean)} CoNLL-2003 examples")
+    else:
+        logger.warning("⚠️  No CoNLL-2003 data loaded")
+    
+    # 2. Try to load Census data
+    logger.info("🔄 Loading Census data...")
     census_clean = load_census_with_fallback(label_list, cleaner, census_path)
-    all_examples = conll_clean + census_clean
+    if census_clean:
+        all_examples.extend(census_clean)
+        logger.info(f"✅ Added {len(census_clean)} Census examples")
+    else:
+        logger.warning("⚠️  No Census data loaded")
+    
+    # 3. Try to load LLM-generated data
+    logger.info("🔄 Loading LLM-generated data...")
+    llm_data = load_llm_generated_data()
+    if llm_data:
+        all_examples.extend(llm_data)
+        logger.info(f"✅ Added {len(llm_data)} LLM-generated examples")
+    else:
+        logger.warning("⚠️  No LLM-generated data loaded")
+    
+    # 4. Add synthetic data as backup/augmentation
     if len(all_examples) == 0:
-        logger.warning("No real data loaded, using only synthetic data.")
+        logger.warning("❌ No real data loaded, using only synthetic data.")
+        synthetic_count = max(synthetic_count, 5000)  # Use more if no real data
+    
+    logger.info(f"🔄 Generating {synthetic_count} synthetic examples...")
     synthetic_generator = AdvancedSyntheticGenerator()
     synthetic_examples = synthetic_generator.generate_realistic_examples(synthetic_count)
-    all_examples += synthetic_examples
+    all_examples.extend(synthetic_examples)
+    logger.info(f"✅ Added {len(synthetic_examples)} synthetic examples")
+    
+    # Shuffle the combined dataset
     random.shuffle(all_examples)
+    
+    logger.info(f"📊 Total combined dataset: {len(all_examples)} examples")
+    logger.info("✅ Dataset preparation complete!")
+    
     return all_examples
 
 def parse_local_conll_file(file_path):
