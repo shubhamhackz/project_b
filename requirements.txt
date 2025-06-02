@@ -1,0 +1,11 @@
+torch
+transformers
+datasets
+seqeval
+imbalanced-learn
+scikit-learn
+pytorch-crf
+sentence-transformers
+spacy
+matplotlib
+pandas
