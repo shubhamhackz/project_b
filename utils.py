@@ -144,6 +144,55 @@ def load_conll_with_fallback(label_list):
 
 # Robust multi-step loading for Census
 def load_census_with_fallback(label_list, cleaner, census_path=None):
+    # Try local pre-filtered file first (most efficient)
+    local_clean_file = "data/census_clean.json"
+    if os.path.exists(local_clean_file):
+        try:
+            logger.info(f"📂 Loading pre-filtered census data from {local_clean_file}")
+            import json
+            with open(local_clean_file, 'r') as f:
+                cleaned_data = json.load(f)
+            
+            def filter_census_for_email_phone(examples):
+                filtered = []
+                for ex in examples:
+                    if any(tag in [9,10,11,12] for tag in ex['ner_tags']):
+                        filtered.append({
+                            'tokens': ex['tokens'],
+                            'ner_tags': [tag if tag in [0,9,10,11,12] else 0 for tag in ex['ner_tags']]
+                        })
+                return filtered
+            
+            result = filter_census_for_email_phone(cleaned_data)
+            logger.info(f"✅ Loaded {len(result)} clean census examples from local file")
+            logger.info("💡 Much faster than downloading 1M+ examples!")
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to load local census file: {e}")
+    
+    # Fall back to extraction script
+    try:
+        logger.info("Local census file not found, running extraction...")
+        from scripts.extract_census_data import load_local_census_data
+        cleaned_data = load_local_census_data()
+        
+        def filter_census_for_email_phone(examples):
+            filtered = []
+            for ex in examples:
+                if any(tag in [9,10,11,12] for tag in ex['ner_tags']):
+                    filtered.append({
+                        'tokens': ex['tokens'],
+                        'ner_tags': [tag if tag in [0,9,10,11,12] else 0 for tag in ex['ner_tags']]
+                    })
+            return filtered
+        
+        result = filter_census_for_email_phone(cleaned_data)
+        logger.info(f"✅ Extracted and loaded {len(result)} census examples")
+        return result
+    except Exception as e:
+        logger.warning(f"Census extraction failed: {e}")
+    
+    # Original fallback approaches (download full dataset)
     census_approaches = []
     
     if census_path:

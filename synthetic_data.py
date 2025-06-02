@@ -105,18 +105,21 @@ class AdvancedSyntheticGenerator:
                 # Phone detection (digits with 3+ characters)
                 elif len(re.sub(r'[^\d]', '', token)) >= 3:
                     phone_tokens.append(i)
-                
-                # Phone punctuation between digits
-                elif token in ['(', ')', '-', '.', '+'] and i > 0 and i < len(tokens) - 1:
-                    prev_has_digits = bool(re.search(r'\d', tokens[i-1]))
-                    next_has_digits = bool(re.search(r'\d', tokens[i+1]))
-                    if prev_has_digits and next_has_digits:
+            
+            # Second pass: add punctuation only between actual phone digits
+            phone_digit_positions = list(phone_tokens)  # Copy the digit positions
+            for i, token in enumerate(tokens):
+                # Phone punctuation between actual phone digits only
+                if token in ['(', ')', '-', '.', '+'] and i > 0 and i < len(tokens) - 1:
+                    prev_is_phone = (i-1) in phone_digit_positions
+                    next_is_phone = (i+1) in phone_digit_positions
+                    if prev_is_phone and next_is_phone:
                         phone_tokens.append(i)
-                
-                # Phone trailing punctuation (like final '.' after phone)
-                elif token in ['.', ')'] and i > 0:
-                    prev_token_digits = re.sub(r'[^\d]', '', tokens[i-1])
-                    if len(prev_token_digits) >= 3:  # Previous token was likely phone digits
+                    elif token in ['(', ')'] and i < len(tokens) - 1 and (i+1) in phone_digit_positions:
+                        # Opening/closing parentheses before phone numbers
+                        phone_tokens.append(i)
+                    elif token in ['(', ')'] and i > 0 and (i-1) in phone_digit_positions:
+                        # Opening/closing parentheses after phone numbers
                         phone_tokens.append(i)
                 
                 # Person name detection (ONLY if NOT in email context)

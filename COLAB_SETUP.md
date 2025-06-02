@@ -21,12 +21,25 @@
 !unzip conll2003.zip -d data/conll2003/
 ```
 
-### 3. Install Dependencies
+### 3. Extract Clean Census Data (Optional but Recommended)
+```python
+# Extract clean census data locally (only ~2,791 examples from 1M+)
+# This is MUCH faster than downloading 1M+ examples each time
+!python extract_census_data.py
+```
+
+**This will:**
+- Download the full census dataset (1M+ examples) 
+- Apply cleaning and filtering
+- Save only the clean examples (~2,791) to `data/census_clean.json`
+- Future runs will use this local file (much faster!)
+
+### 4. Install Dependencies
 ```python
 !pip install torch transformers datasets seqeval pytorch-crf mlflow tiktoken
 ```
 
-### 4. Test Data Loading
+### 5. Test Data Loading
 ```python
 !python test_data_loading.py
 ```
@@ -39,7 +52,7 @@ INFO: Loaded XXXX examples from local CoNLL-2003
 🟢 SUCCESS: Real data loading works!
 ```
 
-### 5. Run Training
+### 6. Run Training
 ```python
 !python main.py
 ```

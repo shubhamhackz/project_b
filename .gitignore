@@ -94,6 +94,9 @@ coverage.xml
 *.npz
 *.npy
 
+# # Generated/extracted data files
+# data/census_clean.json
+
 # Results, metadata, and experiment outputs
 production-ner-model-final/
 production-ner-deberta-crf/

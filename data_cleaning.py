@@ -62,76 +62,113 @@ class ProductionDataCleaner:
                 tokens = user_text.replace(',', ' , ').replace('.', ' . ').replace('(', ' ( ').replace(')', ' ) ').split()
                 tags = [0] * len(tokens)
                 if email_valid:
-                    email_lower = email.lower()
-                    email_tokens_found = []
+                    # Find all email-related tokens
+                    email_groups = []
+                    i = 0
                     
-                    # First pass: find @ symbols
-                    at_symbol_indices = []
-                    for i, token in enumerate(tokens):
-                        if '@' in token.lower():
-                            at_symbol_indices.append(i)
-                            email_tokens_found.append(i)
-                    
-                    # Find email context (tokens near @ symbols)
-                    email_context_indices = set()
-                    for at_idx in at_symbol_indices:
-                        for j in range(max(0, at_idx - 3), min(len(tokens), at_idx + 4)):
-                            email_context_indices.add(j)
-                    
-                    # Second pass: context-aware email component detection
-                    for i, token in enumerate(tokens):
-                        token_lower = token.lower()
+                    while i < len(tokens):
+                        token = tokens[i].lower()
                         
-                        # Skip if already found @ symbol
-                        if '@' in token_lower:
-                            continue
+                        # Look for email start (contains @ or starts an email sequence)
+                        if '@' in token or (i < len(tokens) - 2 and 
+                                          tokens[i+1] == '@' and 
+                                          tokens[i+2].lower().replace('.', '') in ['com', 'net', 'org', 'gov', 'edu']):
+                            email_group = []
                             
-                        # Only look for email components near @ symbols
-                        if i in email_context_indices:
-                            if any(email_part in token_lower for email_part in email_lower.replace('@', '.').split('.')):
-                                email_tokens_found.append(i)
-                            elif token in ['.'] and i > 0 and i < len(tokens) - 1:
-                                # Punctuation between email parts
-                                prev_in_context = (i-1) in email_context_indices
-                                next_in_context = (i+1) in email_context_indices
-                                if prev_in_context and next_in_context:
-                                    email_tokens_found.append(i)
+                            # Collect email parts (may be separated by spaces)
+                            while i < len(tokens):
+                                current_token = tokens[i]
+                                
+                                # Check if token is email-related
+                                is_email_part = ('@' in current_token or 
+                                               current_token == '.' or
+                                               current_token.lower() in ['com', 'net', 'org', 'gov', 'edu', 'hotmail', 'gmail', 'yahoo'] or
+                                               (current_token.isalnum() and len(current_token) > 1))
+                                
+                                if is_email_part:
+                                    email_group.append(i)
+                                    i += 1
+                                    # Continue if next token might be part of email
+                                    if (i < len(tokens) and 
+                                        (tokens[i] == '.' or 
+                                         tokens[i].lower() in ['com', 'net', 'org', 'gov', 'edu'] or
+                                         '@' in tokens[i])):
+                                        continue
+                                    else:
+                                        break
+                                else:
+                                    break
+                            
+                            # Add valid email groups (must contain @)
+                            if email_group and any('@' in tokens[idx] for idx in email_group):
+                                email_groups.append(email_group)
+                        else:
+                            i += 1
                     
-                    # Apply proper BIO tagging for email
-                    if email_tokens_found:
-                        # Sort to ensure proper sequence
-                        email_tokens_found.sort()
-                        tags[email_tokens_found[0]] = 9  # B-EMAIL
-                        for idx in email_tokens_found[1:]:
-                            tags[idx] = 10  # I-EMAIL
+                    # Apply BIO tagging to each email group independently
+                    for group in email_groups:
+                        if group:
+                            tags[group[0]] = 9   # B-EMAIL
+                            for idx in group[1:]:
+                                tags[idx] = 10   # I-EMAIL
 
                 if phone_valid:
                     phone_digits = re.sub(r'[^\d]', '', phone)
-                    phone_tokens_found = []
-                    # Find all tokens that are part of the phone number
-                    for i, token in enumerate(tokens):
-                        token_digits = re.sub(r'[^\d]', '', token)
-                        if len(token_digits) >= 3 and token_digits in phone_digits:
-                            phone_tokens_found.append(i)
-                        elif token in ['(', ')', '-', '.', '+'] and i > 0 and i < len(tokens) - 1:
-                            # Check if this punctuation is between phone number parts
-                            prev_has_digits = bool(re.search(r'\d', tokens[i-1]))
-                            next_has_digits = bool(re.search(r'\d', tokens[i+1]))
-                            if prev_has_digits and next_has_digits:
-                                phone_tokens_found.append(i)
-                        elif token in ['.', ')'] and i > 0:
-                            # Phone trailing punctuation
-                            prev_token_digits = re.sub(r'[^\d]', '', tokens[i-1])
-                            if len(prev_token_digits) >= 3:
-                                phone_tokens_found.append(i)
                     
-                    # Apply proper BIO tagging for phone
-                    if phone_tokens_found:
-                        # Sort to ensure proper sequence
-                        phone_tokens_found.sort()
-                        tags[phone_tokens_found[0]] = 11  # B-PHONE
-                        for idx in phone_tokens_found[1:]:
-                            tags[idx] = 12  # I-PHONE
+                    # Find all potential phone number groups in the text
+                    phone_groups = []
+                    i = 0
+                    
+                    while i < len(tokens):
+                        token = tokens[i]
+                        token_digits = re.sub(r'[^\d]', '', token)
+                        
+                        # Look for start of phone number (opening paren or digit sequence)
+                        if token == '(' or (len(token_digits) >= 3 and token_digits in phone_digits):
+                            phone_group = []
+                            
+                            # Collect consecutive phone-related tokens
+                            while i < len(tokens):
+                                current_token = tokens[i]
+                                current_digits = re.sub(r'[^\d]', '', current_token)
+                                
+                                # Check if token is phone-related
+                                is_phone_digit = len(current_digits) >= 3 and current_digits in phone_digits
+                                is_phone_punct = current_token in ['(', ')', '-', '.', '+']
+                                
+                                if is_phone_digit or is_phone_punct:
+                                    # But avoid decimal numbers (check context)
+                                    if current_token == '.':
+                                        # Only include if between phone digits
+                                        prev_is_phone = (i > 0 and i-1 < len(tokens) and 
+                                                        len(re.sub(r'[^\d]', '', tokens[i-1])) >= 3)
+                                        next_is_phone = (i < len(tokens)-1 and 
+                                                        len(re.sub(r'[^\d]', '', tokens[i+1])) >= 3)
+                                        if prev_is_phone and next_is_phone:
+                                            phone_group.append(i)
+                                    else:
+                                        phone_group.append(i)
+                                    i += 1
+                                else:
+                                    break
+                            
+                            # Add valid phone groups (must have at least one digit token)
+                            if phone_group and any(len(re.sub(r'[^\d]', '', tokens[idx])) >= 3 
+                                                 for idx in phone_group):
+                                # Validate total phone number has at least 7 digits
+                                total_digits = ''.join(re.sub(r'[^\d]', '', tokens[idx]) 
+                                                     for idx in phone_group)
+                                if len(total_digits) >= 7:
+                                    phone_groups.append(phone_group)
+                        else:
+                            i += 1
+                    
+                    # Apply BIO tagging to each phone group independently
+                    for group in phone_groups:
+                        if group:
+                            tags[group[0]] = 11  # B-PHONE
+                            for idx in group[1:]:
+                                tags[idx] = 12  # I-PHONE
                 if any(tag > 0 for tag in tags):
                     cleaned_examples.append({'tokens': tokens, 'ner_tags': tags})
                     stats['kept'] += 1
