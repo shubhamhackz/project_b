@@ -3,6 +3,9 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from synthetic_data import AdvancedSyntheticGenerator
+import logging
+
+logger = logging.getLogger(__name__)
 
 def set_seed_everything(seed=42):
     random.seed(seed)
@@ -84,53 +87,79 @@ def compute_advanced_class_weights(dataset, label_list):
     weights = weights / weights.sum() * len(weights)
     return weights
 
-# Load CoNLL-2003
-conll = load_dataset("conll2003")
+# Robust multi-step loading for CoNLL-2003
+def load_conll_with_fallback(label_list):
+    approaches = [
+        ("streaming=True", lambda: load_dataset("conll2003", streaming=True, trust_remote_code=True)),
+        ("keep_in_memory=True", lambda: load_dataset("conll2003", keep_in_memory=True, verification_mode="no_checks", trust_remote_code=True)),
+        ("force download to new cache", lambda: load_dataset("conll2003", cache_dir="/tmp/fresh_cache", download_mode="force_redownload", verification_mode="no_checks", trust_remote_code=True)),
+        ("no cache at all", lambda: load_dataset("conll2003", cache_dir=None, verification_mode="no_checks", trust_remote_code=True))
+    ]
+    conll = None
+    for approach_name, load_func in approaches:
+        try:
+            logger.info(f"Trying CoNLL-2003 approach: {approach_name}")
+            conll = load_func()
+            if hasattr(conll, 'train') and hasattr(conll['train'], '__iter__') and not hasattr(conll['train'], '__len__'):
+                logger.info("Converting streaming dataset to regular dataset...")
+                train_data = list(conll['train'])
+                conll = {'train': train_data}
+            logger.info(f"Success with CoNLL-2003 approach: {approach_name}")
+            break
+        except Exception as e:
+            logger.warning(f"Failed CoNLL-2003 {approach_name}: {str(e)[:100]}...")
+            continue
+    def filter_conll_for_person_org(examples):
+        filtered = []
+        for ex in examples:
+            if any(tag in [1,2,3,4] for tag in ex['ner_tags']):
+                filtered.append({
+                    'tokens': ex['tokens'],
+                    'ner_tags': [tag if tag in [0,1,2,3,4] else 0 for tag in ex['ner_tags']]
+                })
+        return filtered
+    if conll is not None:
+        return filter_conll_for_person_org(conll['train'])
+    else:
+        logger.warning("All CoNLL-2003 loading approaches failed, using fallback synthetic data.")
+        return []
 
-# Map: 1,2 = B/I-PER; 3,4 = B/I-ORG
-def filter_conll_for_person_org(examples):
-    filtered = []
-    for ex in examples:
-        if any(tag in [1,2,3,4] for tag in ex['ner_tags']):
-            filtered.append({
-                'tokens': ex['tokens'],
-                'ner_tags': [tag if tag in [0,1,2,3,4] else 0 for tag in ex['ner_tags']]
-            })
-    return filtered
+# Robust multi-step loading for Census
+def load_census_with_fallback(label_list, cleaner, census_path=None):
+    try:
+        if census_path:
+            logger.info(f"Trying to load Census from local file: {census_path}")
+            census = load_dataset("csv", data_files=census_path)
+        else:
+            logger.info("Trying to load Census from remote URL")
+            census = load_dataset(
+                "csv",
+                data_files="https://huggingface.co/datasets/Josephgflowers/CENSUS-NER-Name-Email-Address-Phone/resolve/main/FMCSA_CENSUS1_2016Sep_formatted_output.csv"
+            )
+        cleaned = cleaner.clean_census_data(census['train'])
+        def filter_census_for_email_phone(examples):
+            filtered = []
+            for ex in examples:
+                if any(tag in [9,10,11,12] for tag in ex['ner_tags']):
+                    filtered.append({
+                        'tokens': ex['tokens'],
+                        'ner_tags': [tag if tag in [0,9,10,11,12] else 0 for tag in ex['ner_tags']]
+                    })
+            return filtered
+        return filter_census_for_email_phone(cleaned)
+    except Exception as e:
+        logger.warning(f"Census data loading failed: {e}")
+        return []
 
-conll_clean = filter_conll_for_person_org(conll['train'])
-
-# Load Census (replace with your local path if needed)
-census = load_dataset(
-    "csv",
-    data_files="path_or_url_to_census.csv",
-    csv_args={"header": 0}
-)
-
-from data_cleaning import ProductionDataCleaner
-cleaner = ProductionDataCleaner()
-census_cleaned = cleaner.clean_census_data(census['train'])
-
-def filter_census_for_email_phone(examples):
-    filtered = []
-    for ex in examples:
-        if any(tag in [9,10,11,12] for tag in ex['ner_tags']):
-            filtered.append({
-                'tokens': ex['tokens'],
-                'ner_tags': [tag if tag in [0,9,10,11,12] else 0 for tag in ex['ner_tags']]
-            })
-    return filtered
-
-census_clean = filter_census_for_email_phone(census_cleaned)
-
-all_examples = conll_clean + census_clean
-
-synthetic_generator = AdvancedSyntheticGenerator()
-synthetic_examples = synthetic_generator.generate_realistic_examples(1000)  # or any number
-
-all_examples += synthetic_examples
-
-random.shuffle(all_examples)
-
-# Split into train/val/test
-splits = advanced_dataset_split(all_examples)
+# Utility to prepare combined dataset
+def prepare_combined_dataset(label_list, cleaner, census_path=None, synthetic_count=1000):
+    conll_clean = load_conll_with_fallback(label_list)
+    census_clean = load_census_with_fallback(label_list, cleaner, census_path)
+    all_examples = conll_clean + census_clean
+    if len(all_examples) == 0:
+        logger.warning("No real data loaded, using only synthetic data.")
+    synthetic_generator = AdvancedSyntheticGenerator()
+    synthetic_examples = synthetic_generator.generate_realistic_examples(synthetic_count)
+    all_examples += synthetic_examples
+    random.shuffle(all_examples)
+    return all_examples

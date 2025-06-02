@@ -99,6 +99,18 @@ production-ner-model-final/
 production-ner-deberta-crf/
 model_metadata.json
 
+# MLflow experiment tracking
+mlruns/
+mlartifacts/
+.mlflow/
+
+# Model checkpoints and training artifacts
+checkpoints/
+*.safetensors
+runs/
+logs/
+wandb/
+
 # Other
 *.log
 *.sqlite3

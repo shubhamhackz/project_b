@@ -9,3 +9,5 @@ sentence-transformers
 spacy
 matplotlib
 pandas
+mlflow
+tiktoken

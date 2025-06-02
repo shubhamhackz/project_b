@@ -63,15 +63,75 @@ class ProductionDataCleaner:
                 tags = [0] * len(tokens)
                 if email_valid:
                     email_lower = email.lower()
+                    email_tokens_found = []
+                    
+                    # First pass: find @ symbols
+                    at_symbol_indices = []
                     for i, token in enumerate(tokens):
-                        if '@' in token.lower() and any(part in token.lower() for part in email_lower.split('@')):
-                            tags[i] = 9
+                        if '@' in token.lower():
+                            at_symbol_indices.append(i)
+                            email_tokens_found.append(i)
+                    
+                    # Find email context (tokens near @ symbols)
+                    email_context_indices = set()
+                    for at_idx in at_symbol_indices:
+                        for j in range(max(0, at_idx - 3), min(len(tokens), at_idx + 4)):
+                            email_context_indices.add(j)
+                    
+                    # Second pass: context-aware email component detection
+                    for i, token in enumerate(tokens):
+                        token_lower = token.lower()
+                        
+                        # Skip if already found @ symbol
+                        if '@' in token_lower:
+                            continue
+                            
+                        # Only look for email components near @ symbols
+                        if i in email_context_indices:
+                            if any(email_part in token_lower for email_part in email_lower.replace('@', '.').split('.')):
+                                email_tokens_found.append(i)
+                            elif token in ['.'] and i > 0 and i < len(tokens) - 1:
+                                # Punctuation between email parts
+                                prev_in_context = (i-1) in email_context_indices
+                                next_in_context = (i+1) in email_context_indices
+                                if prev_in_context and next_in_context:
+                                    email_tokens_found.append(i)
+                    
+                    # Apply proper BIO tagging for email
+                    if email_tokens_found:
+                        # Sort to ensure proper sequence
+                        email_tokens_found.sort()
+                        tags[email_tokens_found[0]] = 9  # B-EMAIL
+                        for idx in email_tokens_found[1:]:
+                            tags[idx] = 10  # I-EMAIL
+
                 if phone_valid:
                     phone_digits = re.sub(r'[^\d]', '', phone)
+                    phone_tokens_found = []
+                    # Find all tokens that are part of the phone number
                     for i, token in enumerate(tokens):
                         token_digits = re.sub(r'[^\d]', '', token)
                         if len(token_digits) >= 3 and token_digits in phone_digits:
-                            tags[i] = 11
+                            phone_tokens_found.append(i)
+                        elif token in ['(', ')', '-', '.', '+'] and i > 0 and i < len(tokens) - 1:
+                            # Check if this punctuation is between phone number parts
+                            prev_has_digits = bool(re.search(r'\d', tokens[i-1]))
+                            next_has_digits = bool(re.search(r'\d', tokens[i+1]))
+                            if prev_has_digits and next_has_digits:
+                                phone_tokens_found.append(i)
+                        elif token in ['.', ')'] and i > 0:
+                            # Phone trailing punctuation
+                            prev_token_digits = re.sub(r'[^\d]', '', tokens[i-1])
+                            if len(prev_token_digits) >= 3:
+                                phone_tokens_found.append(i)
+                    
+                    # Apply proper BIO tagging for phone
+                    if phone_tokens_found:
+                        # Sort to ensure proper sequence
+                        phone_tokens_found.sort()
+                        tags[phone_tokens_found[0]] = 11  # B-PHONE
+                        for idx in phone_tokens_found[1:]:
+                            tags[idx] = 12  # I-PHONE
                 if any(tag > 0 for tag in tags):
                     cleaned_examples.append({'tokens': tokens, 'ner_tags': tags})
                     stats['kept'] += 1

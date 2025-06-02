@@ -61,29 +61,104 @@ class AdvancedSyntheticGenerator:
             text = template.format(name=name, company=company, email=email, phone=phone)
             tokens = text.replace(',', ' , ').replace('.', ' . ').replace('(', ' ( ').replace(')', ' ) ').replace(':', ' : ').split()
             tags = [0] * len(tokens)
+            
+            # Track entity positions for proper BIO tagging
+            person_tokens = []
+            org_tokens = []
+            email_tokens = []
+            phone_tokens = []
+            
+            # Find all entity tokens first - CONTEXT-AWARE VERSION
             for i, token in enumerate(tokens):
                 token_lower = token.lower()
-                if first_name.lower() in token_lower:
-                    if i > 0 and tags[i-1] in [1, 2]:
-                        tags[i] = 2
-                    else:
-                        tags[i] = 1
-                elif last_name.lower() in token_lower:
-                    if i > 0 and tags[i-1] in [1, 2]:
-                        tags[i] = 2
-                    else:
-                        tags[i] = 1
-                elif any(part.lower() in token_lower for part in company.lower().split()):
-                    if i > 0 and tags[i-1] in [3, 4]:
-                        tags[i] = 4
-                    else:
-                        tags[i] = 3
-                elif '@' in token:
-                    tags[i] = 9
+                
+                # Email detection FIRST (highest priority but context-aware)
+                if '@' in token:
+                    email_tokens.append(i)
+                
+            # Find tokens near @ symbol for email context
+            email_context_indices = set()
+            for email_idx in email_tokens:
+                # Look 3 tokens before and after @ symbol for email components
+                for j in range(max(0, email_idx - 3), min(len(tokens), email_idx + 4)):
+                    email_context_indices.add(j)
+            
+            # Second pass: context-aware detection
+            for i, token in enumerate(tokens):
+                token_lower = token.lower()
+                
+                # Email detection (already found @ symbols)
+                if '@' in token:
+                    continue  # Already added
+                
+                # Email components (only near @ symbol)
+                elif i in email_context_indices:
+                    if any(email_part in token_lower for email_part in email.lower().replace('@', '.').split('.')):
+                        email_tokens.append(i)
+                    elif token in ['.'] and i > 0 and i < len(tokens) - 1:
+                        # Punctuation between email parts
+                        prev_in_email = (i-1) in email_context_indices
+                        next_in_email = (i+1) in email_context_indices
+                        if prev_in_email and next_in_email:
+                            email_tokens.append(i)
+                
+                # Phone detection (digits with 3+ characters)
                 elif len(re.sub(r'[^\d]', '', token)) >= 3:
-                    if i > 0 and tags[i-1] in [11, 12]:
-                        tags[i] = 12
-                    else:
-                        tags[i] = 11
+                    phone_tokens.append(i)
+                
+                # Phone punctuation between digits
+                elif token in ['(', ')', '-', '.', '+'] and i > 0 and i < len(tokens) - 1:
+                    prev_has_digits = bool(re.search(r'\d', tokens[i-1]))
+                    next_has_digits = bool(re.search(r'\d', tokens[i+1]))
+                    if prev_has_digits and next_has_digits:
+                        phone_tokens.append(i)
+                
+                # Phone trailing punctuation (like final '.' after phone)
+                elif token in ['.', ')'] and i > 0:
+                    prev_token_digits = re.sub(r'[^\d]', '', tokens[i-1])
+                    if len(prev_token_digits) >= 3:  # Previous token was likely phone digits
+                        phone_tokens.append(i)
+                
+                # Person name detection (ONLY if NOT in email context)
+                elif i not in email_context_indices:
+                    if first_name.lower() in token_lower or last_name.lower() in token_lower:
+                        # Additional check: prioritize capitalized formal names
+                        if token[0].isupper():  # Capitalized = formal person name
+                            person_tokens.append(i)
+                
+                # Organization detection (ONLY if NOT in email context)
+                elif i not in email_context_indices:
+                    if any(part.lower() in token_lower for part in company.lower().split()):
+                        org_tokens.append(i)
+            
+            # Apply proper BIO tagging
+            # Person entities (B-PER = 1, I-PER = 2)
+            if person_tokens:
+                person_tokens.sort()
+                tags[person_tokens[0]] = 1  # B-PER
+                for idx in person_tokens[1:]:
+                    tags[idx] = 2  # I-PER
+            
+            # Organization entities (B-ORG = 3, I-ORG = 4)  
+            if org_tokens:
+                org_tokens.sort()
+                tags[org_tokens[0]] = 3  # B-ORG
+                for idx in org_tokens[1:]:
+                    tags[idx] = 4  # I-ORG
+            
+            # Email entities (B-EMAIL = 9, I-EMAIL = 10)
+            if email_tokens:
+                email_tokens.sort()
+                tags[email_tokens[0]] = 9  # B-EMAIL
+                for idx in email_tokens[1:]:
+                    tags[idx] = 10  # I-EMAIL
+            
+            # Phone entities (B-PHONE = 11, I-PHONE = 12)
+            if phone_tokens:
+                phone_tokens.sort()
+                tags[phone_tokens[0]] = 11  # B-PHONE
+                for idx in phone_tokens[1:]:
+                    tags[idx] = 12  # I-PHONE
+            
             examples.append({'tokens': tokens, 'ner_tags': tags})
         return examples

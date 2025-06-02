@@ -3,19 +3,25 @@ import torch
 import numpy as np
 import random
 from transformers import AutoTokenizer, TrainingArguments, DataCollatorForTokenClassification, EarlyStoppingCallback
-from datasets import Dataset, DatasetDict, load_dataset, set_caching_enabled
+from datasets import Dataset, DatasetDict, load_dataset
 from datetime import datetime, timedelta
 import json
 import matplotlib.pyplot as plt
 import pandas as pd
-from IPython.display import clear_output
+try:
+    from IPython.display import clear_output
+    IPYTHON_AVAILABLE = True
+except ImportError:
+    IPYTHON_AVAILABLE = False
+    def clear_output(wait=True):
+        pass  # No-op if IPython not available
 import logging
 import transformers
 from transformers import TrainerCallback
 import mlflow
 import traceback
 
-from utils import set_seed_everything, advanced_dataset_split, advanced_tokenize_and_align_labels, compute_advanced_class_weights
+from utils import set_seed_everything, advanced_dataset_split, advanced_tokenize_and_align_labels, compute_advanced_class_weights, prepare_combined_dataset
 from data_cleaning import ProductionDataCleaner
 from synthetic_data import AdvancedSyntheticGenerator
 from model import AdvancedNERModel
@@ -31,7 +37,7 @@ def main():
     # ============= ENVIRONMENT SETUP =============
     set_seed_everything(42)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
 
     # ============= LABELS =============
     label_list = [
@@ -41,105 +47,43 @@ def main():
     ]
     label2id = {l: i for i, l in enumerate(label_list)}
     id2label = {i: l for i, l in enumerate(label_list)}
-    model_checkpoint = "microsoft/deberta-v3-large"
+    
+    # Model options (choose one):
+    model_checkpoint = "bert-base-uncased"        # Most stable, widely used for NER - RECOMMENDED
+    # model_checkpoint = "distilbert-base-uncased"  # Faster, smaller, good performance  
+    # model_checkpoint = "roberta-base"               # Good performance, but needed tokenizer fix
 
     # ============= DATA LOADING & CLEANING =============
     cleaner = ProductionDataCleaner()
-    synthetic_generator = AdvancedSyntheticGenerator()
+    
+    logger.info("🔄 Loading datasets with robust fallback mechanisms...")
+    all_examples = prepare_combined_dataset(label_list, cleaner, census_path=None, synthetic_count=15000)
+    
+    # Log data statistics
+    def log_data_stats(examples, label_list, name="Dataset"):
+        from collections import Counter
+        logger.info(f"{name} stats:")
+        logger.info(f"  Total examples: {len(examples):,}")
+        if examples:
+            token_count = sum(len(e['tokens']) for e in examples)
+            logger.info(f"  Total tokens: {token_count:,}")
+            label_counts = Counter()
+            for e in examples:
+                label_counts.update(e['ner_tags'])
+            for i, label in enumerate(label_list):
+                count = label_counts.get(i, 0)
+                if count > 0:
+                    logger.info(f"    {label}: {count:,}")
+            logger.info(f"  Sample: {examples[0]}")
 
-    # 1. Load CoNLL-2003 with multiple fallback strategies
-    logger.info("1️⃣ Loading CoNLL-2003 for clean PER/ORG...")
-    conll = None
-    approaches = [
-        ("streaming=True", lambda: load_dataset("conll2003", streaming=True)),
-        ("keep_in_memory=True", lambda: load_dataset("conll2003", keep_in_memory=True, verification_mode="no_checks")),
-        ("force download to new cache", lambda: load_dataset("conll2003", cache_dir="/tmp/fresh_cache", download_mode="force_redownload", verification_mode="no_checks")),
-        ("no cache at all", lambda: load_dataset("conll2003", cache_dir=None, verification_mode="no_checks"))
-    ]
-    for approach_name, load_func in approaches:
-        try:
-            print(f"   Trying approach: {approach_name}")
-            conll = load_func()
-            # If streaming, convert to regular dataset
-            if hasattr(conll, 'train') and hasattr(conll['train'], '__iter__') and not hasattr(conll['train'], '__len__'):
-                print("   Converting streaming dataset to regular dataset...")
-                train_data = list(conll['train'])
-                conll = {'train': train_data}
-            print(f"   ✅ Success with approach: {approach_name}")
-            break
-        except Exception as e:
-            print(f"   ❌ Failed with {approach_name}: {str(e)[:100]}...")
-            continue
-    def clamp_labels(examples):
-        for ex in examples:
-            ex['ner_tags'] = [l if 0 <= l < len(label_list) else 0 for l in ex['ner_tags']]
-        return examples
-    if conll is None:
-        print("   🔄 All approaches failed, creating minimal fallback dataset...")
-        fallback_examples = [
-            {"tokens": ["John", "Doe", "works", "at", "Microsoft", "Corporation"], "ner_tags": [1, 2, 0, 0, 3, 4]},
-            {"tokens": ["Contact", "Jane", "Smith", "from", "Google", "Inc"], "ner_tags": [0, 1, 2, 0, 3, 4]},
-            {"tokens": ["Apple", "CEO", "Tim", "Cook", "announced"], "ner_tags": [3, 0, 1, 2, 0]},
-            {"tokens": ["Amazon", "founder", "Jeff", "Bezos"], "ner_tags": [3, 0, 1, 2]},
-            {"tokens": ["Tesla", "and", "SpaceX", "CEO", "Elon", "Musk"], "ner_tags": [3, 0, 3, 0, 1, 2]}
-        ] * 1000
-        dummy_labels = [
-            {"tokens": ["dummy", "email", "test"], "ner_tags": [9, 10, 0]},
-            {"tokens": ["dummy", "phone", "test"], "ner_tags": [11, 12, 0]},
-            {"tokens": ["dummy", "address", "test"], "ner_tags": [13, 14, 0]},
-            {"tokens": ["dummy", "location", "test"], "ner_tags": [5, 6, 0]},
-            {"tokens": ["dummy", "misc", "test"], "ner_tags": [7, 8, 0]},
-        ]
-        fallback_examples += dummy_labels
-        fallback_examples = clamp_labels(fallback_examples)
-        conll = {'train': fallback_examples}
-        print(f"   ✅ Created fallback dataset with {len(fallback_examples)} examples")
-    def process_conll_data(conll_data):
-        processed_examples = []
-        for example in conll_data['train']:
-            tokens = example['tokens']
-            ner_tags = example['ner_tags']
-            new_tags = []
-            for tag in ner_tags:
-                if tag == 0:  # O
-                    new_tags.append(0)
-                elif tag in [1, 2]:  # B-PER, I-PER
-                    new_tags.append(tag)
-                elif tag in [3, 4]:  # B-ORG, I-ORG  
-                    new_tags.append(tag)
-                elif tag in [5, 6]:  # B-LOC, I-LOC
-                    new_tags.append(tag)
-                elif tag in [7, 8]:  # B-MISC, I-MISC
-                    new_tags.append(tag)
-                else:
-                    new_tags.append(0)  # Default to O
-            if any(tag > 0 for tag in new_tags):
-                processed_examples.append({'tokens': tokens, 'ner_tags': new_tags})
-        return processed_examples
-    conll_processed = process_conll_data(conll)
-    print(f"   ✅ CoNLL-2003 processed: {len(conll_processed):,} clean PER/ORG examples")
+    log_data_stats(all_examples, label_list, name="Combined Dataset")
 
-    # 2. Load and clean Census data for EMAIL/PHONE
-    print("2️⃣ Loading and cleaning Census data for EMAIL/PHONE...")
-    try:
-        census = load_dataset(
-            "csv",
-            data_files="https://huggingface.co/datasets/Josephgflowers/CENSUS-NER-Name-Email-Address-Phone/resolve/main/FMCSA_CENSUS1_2016Sep_formatted_output.csv",
-            csv_args={"header": 0}
-        )
-        cleaned_census = cleaner.clean_census_data(census['train'])
-        print(f"   ✅ Census data cleaned: {len(cleaned_census):,} EMAIL/PHONE examples")
-    except Exception as e:
-        print(f"   ⚠️  Census data loading failed: {e}")
-        print("   🔄 Creating synthetic EMAIL/PHONE examples instead...")
-        cleaned_census = []
-
-    # Generate synthetic data
-    print("Generating synthetic data...")
-    synthetic_examples = synthetic_generator.generate_realistic_examples(15000)
-
-    # Combine all data
-    all_examples = conll_processed + cleaned_census + synthetic_examples
+    # Data validation: check for missing values and label alignment
+    for ex in all_examples[:100]:  # Check first 100 examples
+        if len(ex['tokens']) != len(ex['ner_tags']):
+            logger.warning(f"Token/label mismatch: {ex}")
+        if any(l is None for l in ex['ner_tags']):
+            logger.warning(f"Missing label: {ex}")
 
     # ============= DATASET SPLIT & TOKENIZATION =============
     splits = advanced_dataset_split(all_examples)
@@ -150,13 +94,19 @@ def main():
     })
 
     tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
+    # Fix for RoBERTa with pretokenized inputs
+    if "roberta" in model_checkpoint.lower():
+        tokenizer = AutoTokenizer.from_pretrained(model_checkpoint, add_prefix_space=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
+    
     special_tokens = ["<PERSON>", "<ORGANIZATION>", "<EMAIL>", "<PHONE>", "<ADDRESS>"]
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
 
     def tokenize_fn(examples):
         return advanced_tokenize_and_align_labels(examples, tokenizer, label_list)
 
-    print("Tokenizing datasets...")
+    logger.info("Tokenizing datasets...")
     tokenized_datasets = dataset.map(
         tokenize_fn,
         batched=True,
@@ -252,7 +202,8 @@ def main():
     )
 
     training_logger.start_training()
-    print("\n🔥 Starting training with comprehensive monitoring...")
+    logger.info("🔥 Starting training with comprehensive monitoring...")
+    
     with mlflow.start_run():
         mlflow.log_param("model_checkpoint", model_checkpoint)
         mlflow.log_param("num_epochs", training_args.num_train_epochs)
@@ -264,6 +215,10 @@ def main():
         mlflow.log_metric("num_test_examples", len(tokenized_datasets['test']))
         # Training
         train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+        trainer.save_model(os.path.join(checkpoint_dir, 'last'))
+        # Save best model if available
+        if hasattr(trainer, 'state') and trainer.state.best_model_checkpoint:
+            trainer.save_model(trainer.state.best_model_checkpoint)
         mlflow.log_metric("final_train_loss", train_result.training_loss)
         # Evaluation
         for split_name in ['validation', 'test']:
@@ -273,21 +228,22 @@ def main():
         # Save model artifact
         mlflow.pytorch.log_model(model, "model")
         logger.info("Model and artifacts logged to MLflow.")
+    
     training_end_time = datetime.now()
 
     # ============= EVALUATION =============
-    print("\nEvaluating on validation and test sets...")
+    logger.info("Evaluating on validation and test sets...")
     evaluation_results = {}
     for split_name in ['validation', 'test']:
         results = trainer.evaluate(tokenized_datasets[split_name])
         evaluation_results[split_name] = results
-        print(f"{split_name.upper()} F1: {results.get('eval_f1', 0):.4f}")
+        logger.info(f"{split_name.upper()} F1: {results.get('eval_f1', 0):.4f}")
 
     # ============= SAVE MODEL =============
     model_save_path = "./production-ner-model-final"
     trainer.save_model(model_save_path)
     tokenizer.save_pretrained(model_save_path)
-    print(f"Model and tokenizer saved to {model_save_path}")
+    logger.info(f"Model and tokenizer saved to {model_save_path}")
 
     # ============= SAVE METADATA =============
     metadata = {
@@ -320,47 +276,9 @@ def main():
     }
     with open(os.path.join(model_save_path, 'model_metadata.json'), 'w') as f:
         json.dump(metadata, f, indent=2)
-    print("Metadata saved.")
+    logger.info("Metadata saved.")
 
-    # Example: Replace print with logger.info
-    logger.info("1️⃣ Loading CoNLL-2003 for clean PER/ORG...")
-    # Add data validation and stats logging after loading datasets
-
-    def log_data_stats(examples, label_list, name="Dataset"):
-        from collections import Counter
-        logger.info(f"{name} stats:")
-        logger.info(f"  Total examples: {len(examples):,}")
-        if examples:
-            token_count = sum(len(e['tokens']) for e in examples)
-            logger.info(f"  Total tokens: {token_count:,}")
-            label_counts = Counter()
-            for e in examples:
-                label_counts.update(e['ner_tags'])
-            for i, label in enumerate(label_list):
-                logger.info(f"    {label}: {label_counts.get(i, 0):,}")
-            logger.info(f"  Sample: {examples[0]}")
-
-    # After loading each dataset:
-    log_data_stats(conll_processed, label_list, name="CoNLL-2003")
-    log_data_stats(cleaned_census, label_list, name="Census")
-    log_data_stats(synthetic_examples, label_list, name="Synthetic")
-
-    # Data validation: check for missing values and label alignment
-    for dataset_name, dataset in [("CoNLL-2003", conll_processed), ("Census", cleaned_census), ("Synthetic", synthetic_examples)]:
-        for ex in dataset:
-            if len(ex['tokens']) != len(ex['ner_tags']):
-                logger.warning(f"Token/label mismatch in {dataset_name}: {ex}")
-            if any(l is None for l in ex['ner_tags']):
-                logger.warning(f"Missing label in {dataset_name}: {ex}")
-
-    # Support for custom/local datasets (add CLI/config option to specify file paths)
-    # Example: load from local CSV if provided
-    custom_data_path = os.environ.get('CUSTOM_DATA_PATH')
-    if custom_data_path and os.path.exists(custom_data_path):
-        logger.info(f"Loading custom dataset from {custom_data_path}")
-        custom_data = load_dataset("csv", data_files=custom_data_path)
-        # Add cleaning/processing as needed
-
+# Inference functions
 def predict_single(text, tokenizer, model, label_list):
     tokens = tokenizer.tokenize(text)
     inputs = tokenizer(text, return_tensors="pt")
@@ -378,17 +296,16 @@ def predict_batch(texts, tokenizer, model, label_list):
     return results
 
 # Export to ONNX
-import torch.onnx
-onnx_path = "model.onnx"
-dummy_input = torch.randint(0, len(tokenizer), (1, 32))
-try:
-    torch.onnx.export(model, (dummy_input,), onnx_path, input_names=["input_ids"], output_names=["logits"])
-    logger.info(f"Model exported to ONNX: {onnx_path}")
-except Exception as e:
-    logger.warning(f"ONNX export failed: {e}")
+def export_to_onnx(model, tokenizer, output_path="model.onnx"):
+    import torch.onnx
+    dummy_input = torch.randint(0, len(tokenizer), (1, 32))
+    try:
+        torch.onnx.export(model, (dummy_input,), output_path, input_names=["input_ids"], output_names=["logits"])
+        logger.info(f"Model exported to ONNX: {output_path}")
+    except Exception as e:
+        logger.warning(f"ONNX export failed: {e}")
 
 # Post-processing: group entities and output as JSON
-import json
 def group_entities(tokens, labels):
     entities = []
     current = None

@@ -3,7 +3,13 @@ import time
 from datetime import timedelta
 import matplotlib.pyplot as plt
 import pandas as pd
-from IPython.display import clear_output
+try:
+    from IPython.display import clear_output
+    IPYTHON_AVAILABLE = True
+except ImportError:
+    IPYTHON_AVAILABLE = False
+    def clear_output(wait=True):
+        pass  # No-op if IPython not available
 from transformers import Trainer, EarlyStoppingCallback
 
 class ProductionCRFTrainer(Trainer):
