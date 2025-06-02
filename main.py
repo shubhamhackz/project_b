@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import json
 import matplotlib.pyplot as plt
 import pandas as pd
+import argparse
 try:
     from IPython.display import clear_output
     IPYTHON_AVAILABLE = True
@@ -21,19 +22,54 @@ from transformers import TrainerCallback
 import mlflow
 import traceback
 
-from utils import set_seed_everything, advanced_dataset_split, advanced_tokenize_and_align_labels, compute_advanced_class_weights, prepare_combined_dataset
-from data_cleaning import ProductionDataCleaner
-from synthetic_data import AdvancedSyntheticGenerator
+from utils import prepare_combined_dataset, advanced_tokenize_and_align_labels, set_seed_everything
 from model import AdvancedNERModel
-from train import MonitoredTrainer, TrainingLogger
 from evaluate import compute_advanced_metrics
+from data_cleaning import ProductionDataCleaner
+from train import MonitoredTrainer, TrainingLogger
+
+# Import real-world training enhancements (optional)
+try:
+    from advanced_real_world_training import (
+        RealWorldDataAugmentation,
+        CurriculumLearningScheduler,
+        RealWorldTrainingArguments,
+        create_real_world_dataset,
+        analyze_dataset_difficulty,
+        AdversarialTrainingStrategy
+    )
+    REAL_WORLD_AVAILABLE = True
+    print("✅ Real-world training enhancements available")
+except ImportError:
+    REAL_WORLD_AVAILABLE = False
+    print("⚠️  Real-world training enhancements not available (using standard training)")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 mlflow.set_experiment("NER-Production-Experiment")
 
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='NER Training Pipeline')
+    parser.add_argument('--real-world', action='store_true', 
+                       help='Enable real-world training enhancements (data augmentation, curriculum learning, etc.)')
+    parser.add_argument('--model', default='distilbert-base-uncased',
+                       help='Model checkpoint to use (default: distilbert-base-uncased)')
+    parser.add_argument('--epochs', type=int, default=4,
+                       help='Number of training epochs (default: 4)')
+    parser.add_argument('--batch-size', type=int, default=16,
+                       help='Training batch size (default: 16)')
+    parser.add_argument('--learning-rate', type=float, default=3e-5,
+                       help='Learning rate (default: 3e-5)')
+    parser.add_argument('--synthetic-count', type=int, default=5000,
+                       help='Number of synthetic examples to generate (default: 5000)')
+    return parser.parse_args()
+
 def main():
+    # Parse command line arguments
+    args = parse_arguments()
+    
     # ============= ENVIRONMENT SETUP =============
     set_seed_everything(42)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -49,15 +85,17 @@ def main():
     id2label = {i: l for i, l in enumerate(label_list)}
     
     # Model options (choose one):
-    model_checkpoint = "bert-base-uncased"        # Most stable, widely used for NER - RECOMMENDED
+    model_checkpoint = args.model        # Most stable, widely used for NER - RECOMMENDED
     # model_checkpoint = "distilbert-base-uncased"  # Faster, smaller, good performance  
     # model_checkpoint = "roberta-base"               # Good performance, but needed tokenizer fix
 
     # ============= DATA LOADING & CLEANING =============
     cleaner = ProductionDataCleaner()
-    
-    logger.info("🔄 Loading datasets with robust fallback mechanisms...")
-    all_examples = prepare_combined_dataset(label_list, cleaner, census_path=None, synthetic_count=15000)
+    all_examples = prepare_combined_dataset(
+        label_list, 
+        cleaner, 
+        synthetic_count=args.synthetic_count
+    )
     
     # Log data statistics
     def log_data_stats(examples, label_list, name="Dataset"):
@@ -301,9 +339,9 @@ def export_to_onnx(model, tokenizer, output_path="model.onnx"):
     dummy_input = torch.randint(0, len(tokenizer), (1, 32))
     try:
         torch.onnx.export(model, (dummy_input,), output_path, input_names=["input_ids"], output_names=["logits"])
-        logger.info(f"Model exported to ONNX: {output_path}")
+        print(f"Model exported to ONNX: {output_path}")
     except Exception as e:
-        logger.warning(f"ONNX export failed: {e}")
+        print(f"ONNX export failed: {e}")
 
 # Post-processing: group entities and output as JSON
 def group_entities(tokens, labels):
@@ -334,6 +372,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        logger.error(f"Exception occurred: {e}")
-        logger.error(traceback.format_exc())
+        print(f"Exception occurred: {e}")
+        print(traceback.format_exc())
         raise
