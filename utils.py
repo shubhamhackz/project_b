@@ -4,6 +4,7 @@ import torch
 from datasets import load_dataset
 from synthetic_data import AdvancedSyntheticGenerator
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -89,11 +90,27 @@ def compute_advanced_class_weights(dataset, label_list):
 
 # Robust multi-step loading for CoNLL-2003
 def load_conll_with_fallback(label_list):
+    # Try local files first
+    local_data = load_local_conll_data()
+    if local_data:
+        def filter_conll_for_person_org(examples):
+            filtered = []
+            for ex in examples:
+                if any(tag in [1,2,3,4] for tag in ex['ner_tags']):
+                    filtered.append({
+                        'tokens': ex['tokens'],
+                        'ner_tags': [tag if tag in [0,1,2,3,4] else 0 for tag in ex['ner_tags']]
+                    })
+            return filtered
+        return filter_conll_for_person_org(local_data)
+    
+    # Fall back to remote loading
+    logger.info("Local CoNLL-2003 not found, trying remote loading...")
     approaches = [
+        ("basic loading", lambda: load_dataset("conll2003")),
         ("streaming=True", lambda: load_dataset("conll2003", streaming=True)),
-        ("keep_in_memory=True", lambda: load_dataset("conll2003", keep_in_memory=True, verification_mode="no_checks")),
-        ("force download to new cache", lambda: load_dataset("conll2003", cache_dir="/tmp/fresh_cache", download_mode="force_redownload", verification_mode="no_checks")),
-        ("no cache at all", lambda: load_dataset("conll2003", cache_dir=None, verification_mode="no_checks"))
+        ("no verification", lambda: load_dataset("conll2003", verification_mode="no_checks")),
+        ("force redownload", lambda: load_dataset("conll2003", download_mode="force_redownload")),
     ]
     conll = None
     for approach_name, load_func in approaches:
@@ -109,6 +126,7 @@ def load_conll_with_fallback(label_list):
         except Exception as e:
             logger.warning(f"Failed CoNLL-2003 {approach_name}: {str(e)[:100]}...")
             continue
+    
     def filter_conll_for_person_org(examples):
         filtered = []
         for ex in examples:
@@ -126,30 +144,54 @@ def load_conll_with_fallback(label_list):
 
 # Robust multi-step loading for Census
 def load_census_with_fallback(label_list, cleaner, census_path=None):
-    try:
-        if census_path:
-            logger.info(f"Trying to load Census from local file: {census_path}")
-            census = load_dataset("csv", data_files=census_path)
-        else:
-            logger.info("Trying to load Census from remote URL")
-            census = load_dataset(
-                "csv",
-                data_files="https://huggingface.co/datasets/Josephgflowers/CENSUS-NER-Name-Email-Address-Phone/resolve/main/FMCSA_CENSUS1_2016Sep_formatted_output.csv"
-            )
-        cleaned = cleaner.clean_census_data(census['train'])
-        def filter_census_for_email_phone(examples):
-            filtered = []
-            for ex in examples:
-                if any(tag in [9,10,11,12] for tag in ex['ner_tags']):
-                    filtered.append({
-                        'tokens': ex['tokens'],
-                        'ner_tags': [tag if tag in [0,9,10,11,12] else 0 for tag in ex['ner_tags']]
-                    })
-            return filtered
-        return filter_census_for_email_phone(cleaned)
-    except Exception as e:
-        logger.warning(f"Census data loading failed: {e}")
-        return []
+    census_approaches = []
+    
+    if census_path:
+        census_approaches.append(
+            ("local file", lambda: load_dataset("csv", data_files=census_path))
+        )
+    
+    # Multiple remote loading strategies
+    census_approaches.extend([
+        ("remote URL basic", lambda: load_dataset(
+            "csv",
+            data_files="https://huggingface.co/datasets/Josephgflowers/CENSUS-NER-Name-Email-Address-Phone/resolve/main/FMCSA_CENSUS1_2016Sep_formatted_output.csv"
+        )),
+        ("remote URL no cache", lambda: load_dataset(
+            "csv",
+            data_files="https://huggingface.co/datasets/Josephgflowers/CENSUS-NER-Name-Email-Address-Phone/resolve/main/FMCSA_CENSUS1_2016Sep_formatted_output.csv",
+            cache_dir=None
+        )),
+        ("remote URL force download", lambda: load_dataset(
+            "csv",
+            data_files="https://huggingface.co/datasets/Josephgflowers/CENSUS-NER-Name-Email-Address-Phone/resolve/main/FMCSA_CENSUS1_2016Sep_formatted_output.csv",
+            download_mode="force_redownload"
+        ))
+    ])
+    
+    for approach_name, load_func in census_approaches:
+        try:
+            logger.info(f"Trying to load Census: {approach_name}")
+            census = load_func()
+            cleaned = cleaner.clean_census_data(census['train'])
+            def filter_census_for_email_phone(examples):
+                filtered = []
+                for ex in examples:
+                    if any(tag in [9,10,11,12] for tag in ex['ner_tags']):
+                        filtered.append({
+                            'tokens': ex['tokens'],
+                            'ner_tags': [tag if tag in [0,9,10,11,12] else 0 for tag in ex['ner_tags']]
+                        })
+                return filtered
+            result = filter_census_for_email_phone(cleaned)
+            logger.info(f"Successfully loaded Census with {approach_name}")
+            return result
+        except Exception as e:
+            logger.warning(f"Census loading failed with {approach_name}: {str(e)[:100]}...")
+            continue
+    
+    logger.warning("All Census loading approaches failed")
+    return []
 
 # Utility to prepare combined dataset
 def prepare_combined_dataset(label_list, cleaner, census_path=None, synthetic_count=1000):
@@ -163,3 +205,71 @@ def prepare_combined_dataset(label_list, cleaner, census_path=None, synthetic_co
     all_examples += synthetic_examples
     random.shuffle(all_examples)
     return all_examples
+
+def parse_local_conll_file(file_path):
+    """Parse a local CoNLL-2003 format file"""
+    examples = []
+    current_tokens = []
+    current_ner_tags = []
+    
+    # CoNLL-2003 NER tag mapping to our format
+    conll_to_our_mapping = {
+        'O': 0,
+        'B-PER': 1, 'I-PER': 2,
+        'B-ORG': 3, 'I-ORG': 4,
+        'B-LOC': 5, 'I-LOC': 6,
+        'B-MISC': 7, 'I-MISC': 8
+    }
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                
+                # Empty line or document start indicates end of sentence
+                if not line or line.startswith('-DOCSTART-'):
+                    if current_tokens:
+                        examples.append({
+                            'tokens': current_tokens.copy(),
+                            'ner_tags': current_ner_tags.copy()
+                        })
+                        current_tokens = []
+                        current_ner_tags = []
+                    continue
+                
+                # Parse token line: TOKEN POS CHUNK NER
+                parts = line.split()
+                if len(parts) >= 4:
+                    token = parts[0]
+                    ner_tag = parts[3]
+                    
+                    current_tokens.append(token)
+                    # Map to our label format
+                    mapped_tag = conll_to_our_mapping.get(ner_tag, 0)
+                    current_ner_tags.append(mapped_tag)
+        
+        # Add final sentence if exists
+        if current_tokens:
+            examples.append({
+                'tokens': current_tokens,
+                'ner_tags': current_ner_tags
+            })
+    
+    except Exception as e:
+        logger.error(f"Error parsing {file_path}: {e}")
+        return []
+    
+    return examples
+
+def load_local_conll_data(data_dir="data/conll2003"):
+    """Load CoNLL-2003 data from local files"""
+    train_path = os.path.join(data_dir, "train.txt")
+    
+    if not os.path.exists(train_path):
+        logger.warning(f"Local CoNLL data not found at {train_path}")
+        return []
+    
+    logger.info(f"Loading CoNLL-2003 from local path: {train_path}")
+    examples = parse_local_conll_file(train_path)
+    logger.info(f"Loaded {len(examples)} examples from local CoNLL-2003")
+    return examples
