@@ -18,6 +18,45 @@ class RealWorldDataAugmentation:
             'email': [('@', ' @ '), ('.com', ' .com'), ('email', 'e-mail')]
         }
         
+        # ADVANCED CORRUPTION PATTERNS - Based on training log analysis
+        # These specifically target the surface patterns the model is learning
+        self.surface_pattern_corruption = {
+            'email_advanced': [
+                ('@', ' @ '), ('@', ' AT '), ('@', '@@'), ('@', ' [at] '),
+                ('.com', ' .com'), ('.com', '.c0m'), ('.com', ',com'), ('.com', ' DOT com'),
+                ('.', '..'), ('.', ' . '), ('.', ' [dot] '), 
+                ('+', ' + '), ('_', ' _ '), ('-', ' - ')
+            ],
+            'phone_advanced': [
+                ('(', '( '), (')', ' )'), ('-', ' - '), ('-', ''), ('-', ' dash '),
+                ('555', '55five'), ('123', 'one23'), ('0', 'O'), ('0', 'zero'),
+                ('(555)', '( 555 )'), ('555-', '555 '), ('.', ' dot '),
+                ('ext', 'extension'), ('x', 'ext'), ('1-800', '1 800')
+            ],
+            'name_advanced': [
+                ('Dr.', 'Dr'), ('Mr.', 'Mr'), ('Ms.', 'Ms'), ('Mrs.', 'Mrs'),
+                ('Jr.', 'Jr'), ('Sr.', 'Sr'), ('III', '3rd'), ('II', '2nd'),
+                ('O\'', 'O'), ('Mc', 'Mac'), ('De ', 'de '), ('-', ' ')
+            ]
+        }
+        
+        # Character-level corruption (realistic OCR/typing errors)
+        self.char_corruptions = [
+            ('o', '0'), ('l', '1'), ('i', '1'), ('s', '5'), ('S', '$'),
+            ('e', '3'), ('a', '@'), ('t', '+'), ('g', '9'), ('B', '8'),
+            ('O', '0'), ('I', '1'), ('Z', '2'), ('E', '3'), ('A', '4'),
+            ('G', '6'), ('T', '7'), ('b', '6'), ('q', '9'), ('rn', 'm')
+        ]
+        
+        # Case variations that break pattern recognition
+        self.case_variations = ['lower', 'upper', 'title', 'random', 'alternating']
+        
+        # International formats to test generalization
+        self.intl_formats = {
+            'phone': ['+1', '+44', '+33', '+49', '+86', '+91', '+81', '+61'],
+            'email': ['.co.uk', '.de', '.fr', '.es', '.in', '.cn', '.jp', '.au']
+        }
+        
         # Real-world entity variations
         self.entity_variations = {
             'PERSON': [
@@ -37,6 +76,193 @@ class RealWorldDataAugmentation:
                 '(555) 123-4567 x123', '+44 20 7946 0958', '011-81-3-1234-5678'
             ]
         }
+
+    def apply_surface_pattern_corruption(self, tokens: List[str], ner_tags: List[int], 
+                                       corruption_probability: float = 0.4) -> Tuple[List[str], List[int]]:
+        """
+        CRITICAL: Apply corruption specifically targeting surface patterns 
+        that cause 99%+ F1 scores (overfitting)
+        """
+        if random.random() > corruption_probability:
+            return tokens, ner_tags
+            
+        corrupted_tokens = tokens.copy()
+        
+        # Find entities and corrupt them aggressively
+        current_entity = []
+        current_type = None
+        current_indices = []
+        
+        for i, (token, tag) in enumerate(zip(tokens, ner_tags)):
+            if tag != 0:  # Not 'O'
+                label_name = self._get_label_name(tag)
+                
+                if label_name.startswith('B-'):
+                    # Process previous entity
+                    if current_entity and current_type:
+                        self._apply_targeted_corruption(corrupted_tokens, current_indices, 
+                                                      current_type, current_entity)
+                    
+                    current_entity = [token]
+                    current_type = label_name[2:]
+                    current_indices = [i]
+                    
+                elif label_name.startswith('I-') and current_type:
+                    current_entity.append(token)
+                    current_indices.append(i)
+            else:
+                # End current entity
+                if current_entity and current_type:
+                    self._apply_targeted_corruption(corrupted_tokens, current_indices, 
+                                                  current_type, current_entity)
+                    current_entity = []
+                    current_type = None
+                    current_indices = []
+        
+        # Handle final entity
+        if current_entity and current_type:
+            self._apply_targeted_corruption(corrupted_tokens, current_indices, 
+                                          current_type, current_entity)
+        
+        return corrupted_tokens, ner_tags
+
+    def _get_label_name(self, tag_id: int) -> str:
+        """Convert tag ID to label name"""
+        label_list = [
+            'O', 'B-PER', 'I-PER', 'B-ORG', 'I-ORG', 'B-LOC', 'I-LOC', 
+            'B-MISC', 'I-MISC', 'B-EMAIL', 'I-EMAIL', 'B-PHONE', 'I-PHONE',
+            'B-ADDR', 'I-ADDR'
+        ]
+        return label_list[tag_id] if tag_id < len(label_list) else 'O'
+
+    def _apply_targeted_corruption(self, tokens: List[str], indices: List[int], 
+                                 entity_type: str, entity_tokens: List[str]):
+        """Apply type-specific corruption to break surface pattern learning"""
+        entity_text = ' '.join(entity_tokens)
+        
+        if entity_type == 'EMAIL':
+            corrupted = self._corrupt_email_advanced(entity_text)
+        elif entity_type == 'PHONE':
+            corrupted = self._corrupt_phone_advanced(entity_text)
+        elif entity_type == 'PER':
+            corrupted = self._corrupt_person_advanced(entity_text)
+        else:
+            corrupted = self._corrupt_generic_advanced(entity_text)
+        
+        # Replace tokens (handle tokenization changes)
+        corrupted_tokens = corrupted.split()
+        
+        if len(corrupted_tokens) == len(indices):
+            for i, new_token in zip(indices, corrupted_tokens):
+                tokens[i] = new_token
+        else:
+            # Fallback: corrupt first token only
+            if indices:
+                tokens[indices[0]] = corrupted_tokens[0] if corrupted_tokens else entity_tokens[0]
+
+    def _corrupt_email_advanced(self, email: str) -> str:
+        """Advanced email corruption targeting @ and .com patterns"""
+        corrupted = email
+        
+        # Random character corruption
+        if random.random() < 0.3:
+            for old_char, new_char in random.sample(self.char_corruptions, 2):
+                if old_char in corrupted:
+                    corrupted = corrupted.replace(old_char, new_char, 1)
+        
+        # Target @ and .com specifically (these cause 99% F1)
+        if random.random() < 0.5:
+            old_pattern, new_pattern = random.choice(self.surface_pattern_corruption['email_advanced'])
+            corrupted = corrupted.replace(old_pattern, new_pattern)
+        
+        # Case variation
+        if random.random() < 0.3:
+            case_type = random.choice(self.case_variations)
+            if case_type == 'lower':
+                corrupted = corrupted.lower()
+            elif case_type == 'upper':
+                corrupted = corrupted.upper()
+            elif case_type == 'random':
+                corrupted = ''.join(c.upper() if random.random() < 0.5 else c.lower() for c in corrupted)
+        
+        # Add punctuation noise
+        if random.random() < 0.2:
+            pos = random.randint(0, len(corrupted))
+            corrupted = corrupted[:pos] + random.choice('.,;') + corrupted[pos:]
+            
+        return corrupted
+
+    def _corrupt_phone_advanced(self, phone: str) -> str:
+        """Advanced phone corruption targeting () and - patterns"""
+        corrupted = phone
+        
+        # Target parentheses and dashes specifically (these cause 99% F1)
+        if random.random() < 0.5:
+            old_pattern, new_pattern = random.choice(self.surface_pattern_corruption['phone_advanced'])
+            corrupted = corrupted.replace(old_pattern, new_pattern)
+        
+        # International prefix
+        if random.random() < 0.3:
+            prefix = random.choice(self.intl_formats['phone'])
+            corrupted = f"{prefix} {corrupted}"
+        
+        # Extension variation
+        if random.random() < 0.2:
+            ext = random.randint(100, 9999)
+            ext_format = random.choice(['ext', 'extension', 'x', 'ext.'])
+            corrupted += f" {ext_format} {ext}"
+            
+        return corrupted
+
+    def _corrupt_person_advanced(self, name: str) -> str:
+        """Advanced name corruption targeting titles and capitalization"""
+        corrupted = name
+        
+        # Target titles specifically
+        if random.random() < 0.4:
+            old_pattern, new_pattern = random.choice(self.surface_pattern_corruption['name_advanced'])
+            corrupted = corrupted.replace(old_pattern, new_pattern)
+        
+        # Aggressive case variation (break capitalization patterns)
+        case_type = random.choice(self.case_variations)
+        if case_type == 'lower':
+            corrupted = corrupted.lower()
+        elif case_type == 'upper':
+            corrupted = corrupted.upper()
+        elif case_type == 'alternating':
+            corrupted = ''.join(c.upper() if i % 2 == 0 else c.lower() 
+                               for i, c in enumerate(corrupted))
+        elif case_type == 'random':
+            corrupted = ''.join(c.upper() if random.random() < 0.5 else c.lower() 
+                               for c in corrupted)
+        
+        # Remove/add punctuation
+        if random.random() < 0.3:
+            corrupted = re.sub(r'\.', '', corrupted)
+        
+        if random.random() < 0.2:
+            corrupted = re.sub(r'\s+', '  ', corrupted)
+            
+        return corrupted
+
+    def _corrupt_generic_advanced(self, text: str) -> str:
+        """Generic advanced corruption for ORG, LOC, MISC"""
+        corrupted = text
+        
+        # Character corruption
+        if random.random() < 0.2:
+            for old_char, new_char in random.sample(self.char_corruptions, 1):
+                corrupted = corrupted.replace(old_char, new_char, 1)
+        
+        # Case variation
+        if random.random() < 0.3:
+            case_type = random.choice(self.case_variations)
+            if case_type == 'lower':
+                corrupted = corrupted.lower()
+            elif case_type == 'upper':
+                corrupted = corrupted.upper()
+        
+        return corrupted
 
     def apply_real_world_noise(self, tokens: List[str], ner_tags: List[int], 
                               noise_probability: float = 0.15) -> Tuple[List[str], List[int]]:

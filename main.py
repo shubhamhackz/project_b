@@ -125,6 +125,45 @@ def main():
 
     # ============= DATASET SPLIT & TOKENIZATION =============
     splits = advanced_dataset_split(all_examples)
+    
+    # ============= DATA AUGMENTATION (Real-World Training) =============
+    if args.real_world and REAL_WORLD_AVAILABLE:
+        logger.info("🔧 APPLYING SURFACE PATTERN CORRUPTION")
+        logger.info("   Breaking @ .com patterns (EMAIL 99% F1 → realistic 85-90%)")
+        logger.info("   Breaking () - patterns (PHONE 99% F1 → realistic 82-88%)")
+        logger.info("   Breaking capitalization patterns (PERSON 99% F1 → realistic 88-94%)")
+        
+        # Initialize data augmentation
+        augmentation = RealWorldDataAugmentation()
+        
+        # Apply surface pattern corruption to training data
+        original_train_count = len(splits['train'])
+        augmented_examples = []
+        for example in splits['train']:
+            # Original example
+            augmented_examples.append(example)
+            
+            # 50% chance to add corrupted version
+            if random.random() < 0.5:
+                corrupted_tokens, corrupted_tags = augmentation.apply_surface_pattern_corruption(
+                    example['tokens'], example['ner_tags'], corruption_probability=0.4
+                )
+                
+                augmented_examples.append({
+                    'tokens': corrupted_tokens,
+                    'ner_tags': corrupted_tags,
+                    'source': 'surface_pattern_corrupted'
+                })
+        
+        # Update training split with augmented data
+        splits['train'] = augmented_examples
+        logger.info(f"   Training examples: {len(splits['train']):,} (includes {len(splits['train'])-original_train_count:,} corrupted)")
+        
+        # Add challenging validation examples
+        challenging_examples = augmentation.generate_challenging_examples(count=500)
+        splits['validation'].extend(challenging_examples)
+        logger.info(f"   Added {len(challenging_examples)} challenging validation examples")
+    
     dataset = DatasetDict({
         'train': Dataset.from_list(splits['train']),
         'validation': Dataset.from_list(splits['validation']),
@@ -153,7 +192,11 @@ def main():
     )
 
     # ============= MODEL INIT =============
-    model = AdvancedNERModel(model_checkpoint, num_labels=len(label_list))
+    model = AdvancedNERModel(
+        model_checkpoint, 
+        num_labels=len(label_list),
+        real_world_training=args.real_world
+    )
     model.transformer.resize_token_embeddings(len(tokenizer))
     model.to(device)
 
@@ -162,36 +205,83 @@ def main():
     model.loss_weights.data = class_weights.to(device)
 
     # ============= TRAINING ARGS =============
-    training_args = TrainingArguments(
-        output_dir="./production-ner-deberta-crf",
-        learning_rate=1e-5,
-        num_train_epochs=6,
-        weight_decay=0.01,
-        warmup_ratio=0.15,
-        warmup_steps=500,
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=8,
-        gradient_accumulation_steps=4,
-        max_grad_norm=1.0,
-        logging_steps=50,
-        logging_first_step=True,
-        eval_steps=250,
-        eval_strategy="steps",
-        save_steps=500,
-        save_strategy="steps",
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_f1",
-        greater_is_better=True,
-        fp16=True if device.type == 'cuda' else False,
-        dataloader_pin_memory=True,
-        label_smoothing_factor=0.01,
-        remove_unused_columns=False,
-        dataloader_num_workers=2,
-        lr_scheduler_type="cosine_with_restarts",
-        seed=42,
-        data_seed=42,
-        dataloader_drop_last=True,
-    )
+    # Determine if using robust real-world training based on log analysis
+    if args.real_world:
+        logger.info("🔧 APPLYING REAL-WORLD TRAINING FIXES FOR OVERFITTING")
+        logger.info("   Based on training log analysis showing 99%+ F1 scores (surface pattern learning)")
+        
+        # ROBUST TRAINING CONFIG - Addresses overfitting from training logs
+        training_args = TrainingArguments(
+            output_dir="./production-ner-deberta-crf",
+            learning_rate=args.learning_rate if args.learning_rate != 3e-5 else 1.5e-5,  # Lower LR for stability
+            num_train_epochs=args.epochs if args.epochs != 4 else 8,  # More epochs with lower LR
+            weight_decay=0.02,  # Stronger regularization (was 0.01)
+            warmup_ratio=0.2,   # Extended warmup (was 0.15)
+            warmup_steps=800,   # More warmup steps (was 500)
+            per_device_train_batch_size=args.batch_size if args.batch_size != 16 else 8,  # Smaller batches
+            per_device_eval_batch_size=16,
+            gradient_accumulation_steps=4,
+            max_grad_norm=1.0,  # Gradient clipping maintained
+            logging_steps=50,
+            logging_first_step=True,
+            eval_steps=100,     # More frequent evaluation (was 250)
+            eval_strategy="steps",
+            save_steps=200,     # More frequent saves (was 500)
+            save_strategy="steps",
+            load_best_model_at_end=True,
+            metric_for_best_model="eval_f1",
+            greater_is_better=True,
+            fp16=True if device.type == 'cuda' else False,
+            dataloader_pin_memory=True,
+            label_smoothing_factor=0.1,  # Stronger label smoothing (was 0.01)
+            remove_unused_columns=False,
+            dataloader_num_workers=2,
+            lr_scheduler_type="cosine_with_restarts",
+            seed=42,
+            data_seed=42,
+            dataloader_drop_last=True,
+        )
+        
+        # Set realistic performance targets
+        logger.info("🎯 REALISTIC PERFORMANCE TARGETS:")
+        logger.info("   • EMAIL F1: 85-90% (not 99%)")
+        logger.info("   • PHONE F1: 82-88% (not 99%)")
+        logger.info("   • PERSON F1: 88-94% (not 99%)")
+        logger.info("   • OVERALL F1: 86-92% (not 98%)")
+        logger.info("   • Never expect 100% on any entity type!")
+        
+    else:
+        logger.info("Using standard training configuration")
+        training_args = TrainingArguments(
+            output_dir="./production-ner-deberta-crf",
+            learning_rate=args.learning_rate,
+            num_train_epochs=args.epochs,
+            weight_decay=0.01,
+            warmup_ratio=0.15,
+            warmup_steps=500,
+            per_device_train_batch_size=args.batch_size,
+            per_device_eval_batch_size=8,
+            gradient_accumulation_steps=4,
+            max_grad_norm=1.0,
+            logging_steps=50,
+            logging_first_step=True,
+            eval_steps=250,
+            eval_strategy="steps",
+            save_steps=500,
+            save_strategy="steps",
+            load_best_model_at_end=True,
+            metric_for_best_model="eval_f1",
+            greater_is_better=True,
+            fp16=True if device.type == 'cuda' else False,
+            dataloader_pin_memory=True,
+            label_smoothing_factor=0.01,
+            remove_unused_columns=False,
+            dataloader_num_workers=2,
+            lr_scheduler_type="cosine_with_restarts",
+            seed=42,
+            data_seed=42,
+            dataloader_drop_last=True,
+        )
 
     data_collator = DataCollatorForTokenClassification(tokenizer, pad_to_multiple_of=8)
 

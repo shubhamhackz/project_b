@@ -7,17 +7,27 @@ class AdvancedNERModel(nn.Module):
     """
     Production-grade NER model with CRF layer for sequence consistency
     """
-    def __init__(self, model_checkpoint, num_labels, dropout_rate=0.3):
+    def __init__(self, model_checkpoint, num_labels, dropout_rate=0.3, real_world_training=False):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_checkpoint)
         self.config.num_labels = num_labels
         self.transformer = AutoModel.from_pretrained(model_checkpoint, config=self.config)
+        
+        # Stronger dropout for real-world training to combat overfitting
+        if real_world_training:
+            dropout_rate = 0.4  # Increase from 0.3 to 0.4
+            print(f"🔧 Real-world training mode: Using higher dropout rate {dropout_rate}")
+        
         self.dropout = nn.Dropout(dropout_rate)
         hidden_size = self.config.hidden_size
+        
+        # More aggressive dropout in classifier for real-world training
+        classifier_dropout = dropout_rate * 1.2 if real_world_training else dropout_rate
+        
         self.classifier = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
             nn.ReLU(),
-            nn.Dropout(dropout_rate),
+            nn.Dropout(classifier_dropout),
             nn.Linear(hidden_size // 2, num_labels)
         )
         self.crf = CRF(num_labels, batch_first=True)
