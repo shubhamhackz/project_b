@@ -90,10 +90,10 @@ def compute_advanced_class_weights(dataset, label_list):
 # Robust multi-step loading for CoNLL-2003
 def load_conll_with_fallback(label_list):
     approaches = [
-        ("streaming=True", lambda: load_dataset("conll2003", streaming=True, trust_remote_code=True)),
-        ("keep_in_memory=True", lambda: load_dataset("conll2003", keep_in_memory=True, verification_mode="no_checks", trust_remote_code=True)),
-        ("force download to new cache", lambda: load_dataset("conll2003", cache_dir="/tmp/fresh_cache", download_mode="force_redownload", verification_mode="no_checks", trust_remote_code=True)),
-        ("no cache at all", lambda: load_dataset("conll2003", cache_dir=None, verification_mode="no_checks", trust_remote_code=True))
+        ("streaming=True", lambda: load_dataset("conll2003", streaming=True)),
+        ("keep_in_memory=True", lambda: load_dataset("conll2003", keep_in_memory=True, verification_mode="no_checks")),
+        ("force download to new cache", lambda: load_dataset("conll2003", cache_dir="/tmp/fresh_cache", download_mode="force_redownload", verification_mode="no_checks")),
+        ("no cache at all", lambda: load_dataset("conll2003", cache_dir=None, verification_mode="no_checks"))
     ]
     conll = None
     for approach_name, load_func in approaches:
