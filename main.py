@@ -6,6 +6,9 @@ from transformers import AutoTokenizer, TrainingArguments, DataCollatorForTokenC
 from datasets import Dataset, DatasetDict, load_dataset, set_caching_enabled
 from datetime import datetime, timedelta
 import json
+import matplotlib.pyplot as plt
+import pandas as pd
+from IPython.display import clear_output
 
 from utils import set_seed_everything, advanced_dataset_split, advanced_tokenize_and_align_labels, compute_advanced_class_weights
 from data_cleaning import ProductionDataCleaner
@@ -138,7 +141,7 @@ def main():
     # ============= TRAINING =============
     steps_per_epoch = len(tokenized_datasets['train']) // (training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps)
     total_training_steps = steps_per_epoch * training_args.num_train_epochs
-    training_logger = TrainingLogger(total_training_steps)
+    training_logger = TrainingLogger(total_training_steps, len(all_examples), device)
 
     trainer = MonitoredTrainer(
         logger=training_logger,

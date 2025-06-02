@@ -36,8 +36,10 @@ class ProductionCRFTrainer(Trainer):
 class TrainingLogger:
     """Comprehensive training logger with real-time monitoring"""
     
-    def __init__(self, total_steps):
+    def __init__(self, total_steps, total_examples, device):
         self.total_steps = total_steps
+        self.total_examples = total_examples
+        self.device = device
         self.step_times = []
         self.losses = []
         self.eval_metrics = []
@@ -51,18 +53,18 @@ class TrainingLogger:
         print("🚀 STARTING PRODUCTION-GRADE NER TRAINING WITH LIVE MONITORING")
         print("="*80)
         print("🎯 Target: 95%+ F1 Score with EMAIL/PHONE Detection")
-        print(f"📊 Dataset: {len(all_examples):,} total examples")
+        print(f"📊 Dataset: {self.total_examples:,} total examples")
         print("📈 Implementing Senior Staff Engineer recommendations")
         print(f"⏱️  Estimated total steps: {self.total_steps:,}")
         print("="*80)
         
         # Log initial system state
-        if torch.cuda.is_available() and device.type == 'cuda':
+        if torch.cuda.is_available() and self.device.type == 'cuda':
             print(f"🖥️  GPU: {torch.cuda.get_device_name(0)}")
             print(f"   Memory: {torch.cuda.memory_allocated() / 1e9:.2f}GB allocated")
             print(f"   Reserved: {torch.cuda.memory_reserved() / 1e9:.2f}GB reserved")
         else:
-            print(f"🖥️  Device: {device} (CPU mode)")
+            print(f"🖥️  Device: {self.device} (CPU mode)")
             
     def log_step(self, step, loss, learning_rate=None):
         """Log training step with real-time updates"""
@@ -87,7 +89,7 @@ class TrainingLogger:
                   f"Step Time: {step_time:>5.2f}s")
             
             # Memory monitoring for GPU
-            if torch.cuda.is_available() and device.type == 'cuda':
+            if torch.cuda.is_available() and self.device.type == 'cuda':
                 memory_used = torch.cuda.memory_allocated() / 1e9
                 memory_cached = torch.cuda.memory_reserved() / 1e9
                 if step % 100 == 0:  # Less frequent memory logging
