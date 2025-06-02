@@ -585,7 +585,6 @@ def train_model(args):
             try:
                 # Alternative: save model state dict only
                 import tempfile
-                import os
                 with tempfile.TemporaryDirectory() as temp_dir:
                     model_path = os.path.join(temp_dir, "model_state.pt")
                     torch.save(model.state_dict(), model_path)

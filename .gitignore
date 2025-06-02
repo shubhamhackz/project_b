@@ -100,7 +100,10 @@ coverage.xml
 # Results, metadata, and experiment outputs
 production-ner-model-final/
 production-ner-deberta-crf/
+production-ner-realistic/
 model_metadata.json
+model_test_report.json
+checkpoint_metadata.json
 
 # MLflow experiment tracking
 mlruns/
@@ -114,8 +117,30 @@ runs/
 logs/
 wandb/
 
+# Tools directory cache (if any)
+tools/__pycache__/
+tools/*.pyc
+
+# Python bytecode for tools
+*.pyc
+
+# Temporary files and editor backups
+*~
+*.orig
+.#*
+#*#
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE files
+.idea/
+*.sublime-project
+*.sublime-workspace
+
 # Other
 *.log
 *.sqlite3
-*.db
-.idea/ 
+*.db 
