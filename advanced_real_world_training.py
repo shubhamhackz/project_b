@@ -486,36 +486,192 @@ class CurriculumLearningScheduler:
         return [self.sorted_indices[i] for i in range(subset_size)]
 
 class RealWorldTrainingArguments(TrainingArguments):
-    """Enhanced training arguments for real-world robustness"""
+    """Real-world training arguments with overfitting prevention"""
     
     def __init__(self, *args, **kwargs):
         # Real-world optimized defaults
-        real_world_defaults = {
-            'learning_rate': 2e-5,  # Lower LR for stability
-            'warmup_ratio': 0.1,    # Longer warmup
-            'weight_decay': 0.01,   # Regularization
-            'adam_epsilon': 1e-8,
-            'max_grad_norm': 1.0,   # Gradient clipping
-            'gradient_accumulation_steps': 4,  # Larger effective batch
-            'eval_strategy': 'steps',
-            'eval_steps': 250,      # More frequent evaluation
-            'save_strategy': 'steps',
+        realistic_defaults = {
+            'learning_rate': 2e-5,
+            'weight_decay': 0.01,
+            'warmup_ratio': 0.15,
+            'num_train_epochs': 6,
+            'per_device_train_batch_size': 8,
+            'per_device_eval_batch_size': 16,
+            'gradient_accumulation_steps': 4,
+            'max_grad_norm': 1.0,
+            'logging_steps': 50,
+            'eval_steps': 250,
             'save_steps': 500,
-            'save_total_limit': 3,
             'load_best_model_at_end': True,
-            'metric_for_best_model': 'eval_f1',
+            'metric_for_best_model': "eval_f1",
             'greater_is_better': True,
-            'report_to': [],  # Disable wandb for local training
-            'dataloader_num_workers': 4,
-            'ddp_find_unused_parameters': False,
+            'evaluation_strategy': 'steps',
+            'save_strategy': 'steps',
+            'label_smoothing_factor': 0.02,
+            'dataloader_pin_memory': True,
+            'dataloader_num_workers': 2,
+            'lr_scheduler_type': 'cosine_with_restarts',
+            'fp16': True,
+            'seed': 42,
+            'data_seed': 42,
         }
         
         # Merge with user arguments
-        for key, value in real_world_defaults.items():
-            if key not in kwargs:
-                kwargs[key] = value
-        
+        for key, value in realistic_defaults.items():
+            kwargs.setdefault(key, value)
+            
         super().__init__(*args, **kwargs)
+
+class RealisticNERTraining:
+    """
+    Enhanced training configuration inspired by successful HuggingFace NER models
+    Targets: bert-base-NER (91.3% F1) and distilbert-NER (92.17% F1)
+    """
+    
+    def __init__(self):
+        # Realistic performance targets based on HuggingFace models
+        self.target_performance = {
+            'overall_f1': (0.90, 0.94),      # Target 90-94% like bert-base-NER (91.3%)
+            'precision': (0.89, 0.93),       # Target 89-93%
+            'recall': (0.90, 0.94),          # Target 90-94%
+            'EMAIL': (0.85, 0.92),           # Realistic EMAIL targets
+            'PHONE': (0.82, 0.89),           # Realistic PHONE targets  
+            'PER': (0.88, 0.94),             # Person names
+            'ORG': (0.85, 0.91),             # Organizations
+            'LOC': (0.87, 0.93),             # Locations
+            'MISC': (0.79, 0.87),            # Miscellaneous (hardest)
+        }
+        
+        # Warning thresholds for overfitting detection
+        self.overfitting_thresholds = {
+            'f1_too_high': 0.97,             # F1 > 97% = likely overfitting
+            'entity_perfect': 0.98,          # Any entity > 98% = memorization
+            'loss_gap': 0.4,                 # Train/val loss gap > 0.4 = overfitting
+        }
+
+    def create_anti_overfitting_config(self) -> dict:
+        """
+        Create training configuration that prevents overfitting
+        Based on analysis of bert-base-NER and distilbert-NER success
+        """
+        return {
+            # AGGRESSIVE LEARNING RATE REDUCTION
+            'learning_rate': 8e-6,           # Much lower than standard 2e-5
+            'num_train_epochs': 15,          # More epochs with lower LR
+            
+            # STRONG REGULARIZATION
+            'weight_decay': 0.05,            # Strong weight decay (vs 0.01)
+            'label_smoothing_factor': 0.15,  # Strong label smoothing (vs 0.01)
+            'dropout': 0.4,                  # High dropout rate
+            
+            # SMALLER BATCHES FOR BETTER GENERALIZATION
+            'per_device_train_batch_size': 4,     # Small batches
+            'gradient_accumulation_steps': 8,      # Maintain effective batch size
+            
+            # FREQUENT EVALUATION AND EARLY STOPPING
+            'eval_steps': 50,                # Very frequent evaluation
+            'eval_strategy': 'steps',
+            'save_steps': 100,
+            'logging_steps': 25,
+            
+            # TIGHT GRADIENT CONTROL
+            'max_grad_norm': 0.5,            # Tight gradient clipping
+            'warmup_ratio': 0.3,             # Extended warmup
+            
+            # LEARNING RATE SCHEDULING
+            'lr_scheduler_type': 'cosine_with_restarts',
+            
+            # EARLY STOPPING CONFIGURATION
+            'load_best_model_at_end': True,
+            'metric_for_best_model': 'eval_f1',
+            'greater_is_better': True,
+            
+            # REPRODUCIBILITY
+            'seed': 42,
+            'data_seed': 42,
+            'dataloader_drop_last': True,
+        }
+
+    def detect_overfitting(self, metrics: dict) -> dict:
+        """
+        Detect overfitting patterns and provide warnings
+        Returns analysis with recommendations
+        """
+        warnings = []
+        overfitting_detected = False
+        
+        # Check overall F1 score
+        f1_score = metrics.get('eval_f1', 0)
+        if f1_score > self.overfitting_thresholds['f1_too_high']:
+            warnings.append(f"🚨 OVERFITTING: F1 {f1_score:.3f} > {self.overfitting_thresholds['f1_too_high']} (unrealistic!)")
+            warnings.append(f"   → Target range: {self.target_performance['overall_f1'][0]:.1%}-{self.target_performance['overall_f1'][1]:.1%}")
+            overfitting_detected = True
+        
+        # Check entity-specific scores
+        entity_types = ['EMAIL', 'PHONE', 'PER', 'ORG', 'LOC', 'MISC']
+        for entity in entity_types:
+            entity_f1 = metrics.get(f'eval_{entity.lower()}_f1', 0)
+            if entity_f1 > self.overfitting_thresholds['entity_perfect']:
+                warnings.append(f"🚨 OVERFITTING: {entity} F1 {entity_f1:.3f} > {self.overfitting_thresholds['entity_perfect']} (memorizing patterns!)")
+                target_range = self.target_performance.get(entity, (0.8, 0.9))
+                warnings.append(f"   → {entity} target: {target_range[0]:.1%}-{target_range[1]:.1%}")
+                overfitting_detected = True
+        
+        # Check train/validation loss gap
+        train_loss = metrics.get('train_loss', 0)
+        eval_loss = metrics.get('eval_loss', 0)
+        if train_loss > 0 and eval_loss > 0:
+            loss_gap = eval_loss - train_loss
+            if loss_gap > self.overfitting_thresholds['loss_gap']:
+                warnings.append(f"🚨 OVERFITTING: Loss gap {loss_gap:.3f} > {self.overfitting_thresholds['loss_gap']}")
+                warnings.append(f"   → Train loss: {train_loss:.3f}, Val loss: {eval_loss:.3f}")
+                overfitting_detected = True
+        
+        # Provide recommendations
+        recommendations = []
+        if overfitting_detected:
+            recommendations.extend([
+                "🔧 APPLY AGGRESSIVE ANTI-OVERFITTING:",
+                "   • Reduce learning rate to 5e-6",
+                "   • Increase weight decay to 0.08", 
+                "   • Increase label smoothing to 0.2",
+                "   • Apply more surface pattern corruption",
+                "   • Reduce batch size to 2",
+                "   • Add more challenging validation examples"
+            ])
+        else:
+            recommendations.append("✅ Performance looks realistic and healthy!")
+            
+        return {
+            'overfitting_detected': overfitting_detected,
+            'warnings': warnings,
+            'recommendations': recommendations,
+            'target_ranges': self.target_performance,
+            'reference_models': {
+                'bert-base-NER': {'f1': 0.913, 'precision': 0.907, 'recall': 0.919},
+                'distilbert-NER': {'f1': 0.9217, 'precision': 0.9202, 'recall': 0.9232}
+            }
+        }
+
+    def log_realistic_targets(self):
+        """Log realistic performance targets"""
+        print("\n🎯 REALISTIC PERFORMANCE TARGETS (based on successful HuggingFace models):")
+        print("="*80)
+        print(f"📊 REFERENCE MODELS:")
+        print(f"   • bert-base-NER: F1 91.3%, Precision 90.7%, Recall 91.9%")
+        print(f"   • distilbert-NER: F1 92.17%, Precision 92.02%, Recall 92.32%")
+        print()
+        print(f"🎯 YOUR TARGETS:")
+        print(f"   • Overall F1: {self.target_performance['overall_f1'][0]:.1%}-{self.target_performance['overall_f1'][1]:.1%}")
+        print(f"   • EMAIL F1: {self.target_performance['EMAIL'][0]:.1%}-{self.target_performance['EMAIL'][1]:.1%} (not 99%+)")
+        print(f"   • PHONE F1: {self.target_performance['PHONE'][0]:.1%}-{self.target_performance['PHONE'][1]:.1%} (not 99%+)")
+        print(f"   • PERSON F1: {self.target_performance['PER'][0]:.1%}-{self.target_performance['PER'][1]:.1%} (not 99%+)")
+        print()
+        print(f"⚠️  OVERFITTING ALERTS:")
+        print(f"   • F1 > 97% = Likely overfitting")
+        print(f"   • Any entity > 98% = Memorizing patterns")
+        print(f"   • Train/Val loss gap > 0.4 = Overfitting")
+        print("="*80)
 
 def create_real_world_dataset(base_dataset, augmentation_ratio: float = 0.3):
     """Create enhanced dataset with real-world challenges"""
